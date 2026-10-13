@@ -17,13 +17,13 @@ const ISO = /^\d{4}-\d{2}-\d{2}$/;
 
 export default async function TransactionsPage({ searchParams }: { searchParams: Promise<Params> }) {
   const params = await searchParams;
-  const books = getBooks();
-  const years = books.years();
+  const books = await getBooks();
+  const years = await books.years();
   const year = params.year === "all" ? undefined : pickYear(params.year, years);
   const page = Math.max(1, Number(params.page) || 1);
   const needsReview = params.review === "1";
-  const accounts = books.listAccounts();
-  const { rows, total } = books.listTransactions({
+  const accounts = await books.listAccounts();
+  const { rows, total } = await books.listTransactions({
     year,
     from: params.from && ISO.test(params.from) ? params.from : undefined,
     to: params.to && ISO.test(params.to) ? params.to : undefined,

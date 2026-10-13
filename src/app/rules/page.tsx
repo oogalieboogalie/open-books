@@ -9,8 +9,8 @@ export const dynamic = "force-dynamic";
 const MATCH = { contains: "contains", starts_with: "starts with", exact: "is exactly" } as const;
 const DIRECTION = { any: "", in: " (money in)", out: " (money out)" } as const;
 
-export default function RulesPage() {
-  const rules = getBooks().listRules();
+export default async function RulesPage() {
+  const rules = await (await getBooks()).listRules();
   return (
     <>
       <div className="page-head">

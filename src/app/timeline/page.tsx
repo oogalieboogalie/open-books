@@ -1,7 +1,6 @@
 import Link from "next/link";
 import { headers } from "next/headers";
 import { Activity } from "@/lib/activity";
-import { getDb } from "@/lib/db";
 import { todayIso } from "@/lib/format";
 import { getBooks } from "@/lib/server";
 import { EVENT_KINDS, RANGE_PRESETS, autoGranularity, eventKindLabel, formatDay, resolveRange, type Granularity } from "@/lib/timeline";
@@ -15,14 +14,15 @@ type Params = { range?: string; by?: string; focus?: string };
 
 export default async function TimelinePage({ searchParams }: { searchParams: Promise<Params> }) {
   const params = await searchParams;
-  const books = getBooks();
-  const activity = Activity.for(books, getDb());
+  const books = await getBooks();
+  const activity = Activity.for(books);
   const today = todayIso();
-  const range = resolveRange(params.range, today, activity.earliestDate());
+  const range = resolveRange(params.range, today, await activity.earliestDate());
   const granularity: Granularity = params.by === "day" || params.by === "week" || params.by === "month" ? params.by : autoGranularity(range.from, range.to);
-  const data = activity.timeline(range.from, range.to, granularity);
-  const recentEvents = activity.listEvents(range.from, range.to).reverse().slice(0, 10);
-  const links = activity.listLinks();
+  const data = await activity.timeline(range.from, range.to, granularity);
+  const recentEvents = (await activity.listEvents(range.from, range.to)).reverse().slice(0, 10);
+  const links = await activity.listLinks();
+  const metricDefs = (await activity.metricDefs()).filter((m) => !m.derived);
   const h = await headers();
   const origin = `${h.get("x-forwarded-proto") ?? "http"}://${h.get("host") ?? "localhost:3000"}`;
   const href = (p: Partial<Params>) => `?${new URLSearchParams({ range: range.key, by: granularity, ...p } as Record<string, string>).toString()}`;
@@ -55,7 +55,7 @@ export default async function TimelinePage({ searchParams }: { searchParams: Pro
 
       <div className="grid-2">
         <EventForm today={today} kinds={EVENT_KINDS.map((k) => ({ ...k }))} />
-        <MetricForm today={today} metrics={activity.metricDefs().filter((m) => !m.derived)} />
+        <MetricForm today={today} metrics={metricDefs} />
       </div>
 
       <div className="grid-2">

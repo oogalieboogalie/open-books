@@ -4,7 +4,6 @@ import { money, moneyWhole, pickYear, shortDate } from "@/lib/format";
 import { buildScheduleC } from "@/lib/reports";
 import { getBooks } from "@/lib/server";
 import { Activity } from "@/lib/activity";
-import { getDb } from "@/lib/db";
 import { TimelineExplorer } from "./components/TimelineExplorer";
 import { YearPicker } from "./components/YearPicker";
 
@@ -12,12 +11,13 @@ export const dynamic = "force-dynamic";
 
 export default async function Dashboard({ searchParams }: { searchParams: Promise<{ year?: string; focus?: string }> }) {
   const params = await searchParams;
-  const books = getBooks();
-  const years = books.years();
+  const books = await getBooks();
+  const years = await books.years();
   const year = pickYear(params.year, years);
-  const summary = buildScheduleC(books.categoryTotals(year), year);
-  const review = books.reviewCount();
-  const recent = books.listTransactions({ year, limit: 8 }).rows;
+  const summary = buildScheduleC(await books.categoryTotals(year), year);
+  const review = await books.reviewCount();
+  const recent = (await books.listTransactions({ year, limit: 8 })).rows;
+  const timeline = await Activity.for(books).timeline(`${year}-01-01`, `${year}-12-31`, "month");
   const topLines = [...summary.expenseLines].sort((a, b) => b.deductibleCents - a.deductibleCents).slice(0, 8);
   const topMax = Math.max(1, ...topLines.map((l) => l.amountCents));
 
@@ -71,7 +71,7 @@ export default async function Dashboard({ searchParams }: { searchParams: Promis
           <h2 style={{ margin: 0 }}>Income and expenses by month</h2>
           <Link href="/timeline">Open the timeline for days, weeks, and events</Link>
         </div>
-        <TimelineExplorer key={year} data={Activity.for(books, getDb()).timeline(`${year}-01-01`, `${year}-12-31`, "month")} initialFocus={params.focus} />
+        <TimelineExplorer key={year} data={timeline} initialFocus={params.focus} />
       </div>
 
       <div className="grid-2">

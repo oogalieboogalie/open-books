@@ -19,7 +19,7 @@ This is the first module of a larger open toolkit for small business owners. Mil
 
 ## Quick start
 
-Requires Node.js 22.13 or newer (it uses Node's built-in SQLite, so there is nothing native to compile).
+Requires Node.js 22 or newer.
 
 ```bash
 npm install
@@ -27,9 +27,26 @@ npm run seed:demo   # optional: six months of sample data to explore
 npm run dev         # http://localhost:3000
 ```
 
-Data is stored in `./data/books.db`. Set `BOOKS_DB_PATH` to put it elsewhere. Back it up like any other file.
+With no configuration, data is stored in an embedded Postgres ([PGlite](https://pglite.dev)) under `./data/pglite`, so there is nothing to install. Only one process can open that folder at a time, so stop the app before running `seed:demo`.
 
-For production: `npm run build && npm start`.
+For production, or to share a database, point the app at any Postgres 15+ server:
+
+```bash
+DATABASE_URL=postgres://user:pass@host:5432/books npm run build && npm start
+```
+
+### Docker
+
+`docker compose up` runs the app on Alpine with Postgres 17 and pgvector, entirely on your machine. Open http://localhost:3000. Data lives in the `pgdata` volume.
+
+### Configuration
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `DATABASE_URL` | unset | Postgres connection string. When unset, the embedded database is used. |
+| `PGLITE_DIR` | `./data/pglite` | Where the embedded database keeps its files. |
+| `BUSINESS_TZ` | server timezone | IANA timezone (e.g. `America/Chicago`) for deciding which day a link click falls on. |
+| `DATABASE_POOL_SIZE` | `10` | Max connections to `DATABASE_URL`. |
 
 ## How categorization works
 
@@ -53,12 +70,14 @@ src/lib/books.ts             All reads and writes, scoped to one business
 src/lib/reports.ts           Schedule C summary and SE tax estimate
 src/lib/activity.ts          Events, daily numbers, tracked links, timeline queries
 src/lib/timeline.ts          Day/week/month bucketing and range presets
-src/lib/db.ts                SQLite connection and migrations
+src/lib/db.ts                Postgres connection (server or embedded) and migrations
 src/app/                     Next.js pages and server actions
 tests/                       Vitest tests (npm test)
 ```
 
-Stack: Next.js (App Router, server actions), React, TypeScript, SQLite via `node:sqlite`, Vitest.
+Stack: Next.js (App Router, server actions), React, TypeScript, Postgres (via `pg`, or embedded PGlite), Vitest.
+
+Tests run on the embedded database by default; set `TEST_DATABASE_URL` to run them against a real Postgres server.
 
 ## Contributing
 
@@ -70,7 +89,7 @@ Contributions are welcome, especially merchant keywords. To teach the categorize
 - [ ] Accounts and sign-in, multiple businesses per user (the data model is already scoped by business)
 - [x] Timeline of money, events, and tracked numbers, with drill-down and tracked links
 - [ ] Pull numbers in automatically (booking tools, CRM, website analytics, social platforms)
-- [ ] AI-assisted categorization and bookkeeping support
+- [ ] AI assistant with retrieval over your own books (pgvector), hosted or self-hosted with your own API key
 - [ ] Receipt capture and attachment
 - [ ] Automatic mileage capture and the standard mileage deduction
 - [ ] Quarterly estimated tax reminders

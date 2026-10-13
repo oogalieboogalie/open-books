@@ -1,9 +1,9 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { Activity, recordClick } from "@/lib/activity";
-import { Books } from "@/lib/books";
-import { openDatabase } from "@/lib/db";
+import type { Books } from "@/lib/books";
 import { addMonths, autoGranularity, bucketStart, buildBuckets, resolveRange } from "@/lib/timeline";
-import type { DatabaseSync } from "node:sqlite";
+import { businessTimeZone } from "@/lib/db";
+import { freshBooks } from "./helpers";
 
 describe("bucketing", () => {
   it("starts weeks on Monday and months on the 1st", () => {
@@ -37,35 +37,34 @@ describe("bucketing", () => {
 });
 
 describe("Activity timeline", () => {
-  let db: DatabaseSync;
   let books: Books;
   let activity: Activity;
 
-  beforeEach(() => {
-    db = openDatabase(":memory:");
-    books = Books.forDefaultBusiness(db);
-    activity = Activity.for(books, db);
+  beforeEach(async () => {
+    books = await freshBooks();
+    activity = Activity.for(books);
   });
 
-  it("lines up money, sales count, logged numbers, events, and link clicks per bucket", () => {
-    books.importRows(books.listAccounts()[0].id, [
+  it("lines up money, sales count, logged numbers, events, and link clicks per bucket", async () => {
+    await books.importRows((await books.listAccounts())[0].id, [
       { date: "2026-10-05", description: "STRIPE TRANSFER", amountCents: 50_000 },
       { date: "2026-10-06", description: "SQUARE INC", amountCents: 20_000 },
       { date: "2026-10-06", description: "ADOBE", amountCents: -6_000 },
       { date: "2026-10-07", description: "ONLINE TRANSFER TO SAVINGS", amountCents: -99_999 },
     ]);
-    const eventId = activity.addEvent({ date: "2026-10-05", kind: "social_post", title: "Instagram reel: fall promo", url: "https://instagram.com/p/abc" });
-    const slug = activity.createLink({ destination: "https://example.com/book", eventId, slug: "fall-promo" });
-    activity.logMetric({ date: "2026-10-06", metric: "appointments", value: 4 });
-    activity.logMetric({ date: "2026-10-06", metric: "appointments", value: 5 }); // replaces
-    activity.logMetric({ date: "2026-10-07", metric: "Podcast downloads", value: 120 });
+    const eventId = await activity.addEvent({ date: "2026-10-05", kind: "social_post", title: "Instagram reel: fall promo", url: "https://instagram.com/p/abc" });
+    const slug = await activity.createLink({ destination: "https://example.com/book", eventId, slug: "fall-promo" });
+    await activity.logMetric({ date: "2026-10-06", metric: "appointments", value: 4 });
+    await activity.logMetric({ date: "2026-10-06", metric: "appointments", value: 5 }); // replaces
+    await activity.logMetric({ date: "2026-10-07", metric: "Podcast downloads", value: 120 });
 
-    expect(recordClick(db, "FALL-PROMO")).toBe("https://example.com/book");
-    recordClick(db, slug);
-    expect(recordClick(db, "nope")).toBeNull();
+    expect(await recordClick(books.db, "FALL-PROMO")).toBe("https://example.com/book");
+    await recordClick(books.db, slug);
+    await recordClick(books.db, slug, { count: false }); // a link-preview bot
+    expect(await recordClick(books.db, "nope")).toBeNull();
 
-    const { d: today } = db.prepare("SELECT date('now', 'localtime') AS d").get() as { d: string };
-    const t = activity.timeline("2026-10-05", "2026-10-07", "day");
+    const { d: today } = (await books.db.one<{ d: string }>("SELECT (now() AT TIME ZONE $1)::date AS d", [businessTimeZone()]))!;
+    const t = await activity.timeline("2026-10-05", "2026-10-07", "day");
     expect(t.buckets.map((b) => [b.incomeCents, b.expenseCents])).toEqual([
       [50_000, 0],
       [20_000, 6_000],
@@ -79,25 +78,25 @@ describe("Activity timeline", () => {
     expect(t.events[0]).toMatchObject({ bucket: 0, linkSlug: "fall-promo" });
 
     // Clicks land on today's date, so check them over a range that includes today.
-    const clicks = activity.timeline(today, today, "day").series.find((s) => s.key === "link_clicks");
+    const clicks = (await activity.timeline(today, today, "day")).series.find((s) => s.key === "link_clicks");
     expect(clicks?.values).toEqual([2]);
 
-    const detail = activity.periodDetail("2026-10-06", "2026-10-06", books);
+    const detail = await activity.periodDetail("2026-10-06", "2026-10-06", books);
     expect(detail.incomeCents).toBe(20_000);
     expect(detail.expenseCents).toBe(6_000);
     expect(detail.transactionCount).toBe(2);
     expect(detail.metrics).toEqual([{ date: "2026-10-06", key: "appointments", name: "Appointments", value: 5 }]);
-    expect(activity.periodDetail(today, today, books).clicks).toEqual([
+    expect((await activity.periodDetail(today, today, books)).clicks).toEqual([
       { slug: "fall-promo", destination: "https://example.com/book", eventTitle: "Instagram reel: fall promo", count: 2 },
     ]);
   });
 
-  it("rejects bad input", () => {
-    expect(() => activity.logMetric({ date: "2026-10-06", metric: "link_clicks", value: 1 })).toThrow(/automatically/);
-    expect(() => activity.logMetric({ date: "2026-10-06", metric: "contacts", value: -1 })).toThrow();
-    expect(() => activity.createLink({ destination: "javascript:alert(1)" })).toThrow();
-    expect(() => activity.addEvent({ date: "2026-10-06", kind: "ad", title: "x", url: "ftp://x" })).toThrow();
-    activity.createLink({ destination: "https://a.com", slug: "taken" });
-    expect(() => activity.createLink({ destination: "https://b.com", slug: "taken" })).toThrow(/taken/);
+  it("rejects bad input", async () => {
+    await expect(activity.logMetric({ date: "2026-10-06", metric: "link_clicks", value: 1 })).rejects.toThrow(/automatically/);
+    await expect(activity.logMetric({ date: "2026-10-06", metric: "contacts", value: -1 })).rejects.toThrow();
+    await expect(activity.createLink({ destination: "javascript:alert(1)" })).rejects.toThrow();
+    await expect(activity.addEvent({ date: "2026-10-06", kind: "ad", title: "x", url: "ftp://x" })).rejects.toThrow();
+    await activity.createLink({ destination: "https://a.com", slug: "taken" });
+    await expect(activity.createLink({ destination: "https://b.com", slug: "taken" })).rejects.toThrow(/taken/);
   });
 });

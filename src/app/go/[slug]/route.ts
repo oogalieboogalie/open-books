@@ -8,11 +8,9 @@ const BOTS = /bot|crawl|spider|slurp|preview|facebookexternalhit|embedly|whatsap
 
 export async function GET(request: Request, { params }: { params: Promise<{ slug: string }> }) {
   const { slug } = await params;
-  const db = getDb();
+  const db = await getDb();
   const isBot = BOTS.test(request.headers.get("user-agent") ?? "");
-  const destination = isBot
-    ? ((db.prepare("SELECT destination FROM tracked_links WHERE slug = ?").get(slug.toLowerCase()) as { destination: string } | undefined)?.destination ?? null)
-    : recordClick(db, slug);
+  const destination = await recordClick(db, slug, { count: !isBot });
   if (!destination) return new Response("Link not found", { status: 404 });
   return Response.redirect(destination, 302);
 }

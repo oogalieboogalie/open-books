@@ -4,10 +4,10 @@ import { getBooks } from "@/lib/server";
 
 export const dynamic = "force-dynamic";
 
-export function GET(request: Request) {
-  const books = getBooks();
-  const year = pickYear(new URL(request.url).searchParams.get("year") ?? undefined, books.years());
-  const csv = scheduleCCsv(buildScheduleC(books.categoryTotals(year), year));
+export async function GET(request: Request) {
+  const books = await getBooks();
+  const year = pickYear(new URL(request.url).searchParams.get("year") ?? undefined, await books.years());
+  const csv = scheduleCCsv(buildScheduleC(await books.categoryTotals(year), year));
   return new Response(csv, {
     headers: {
       "Content-Type": "text/csv; charset=utf-8",

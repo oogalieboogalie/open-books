@@ -5,11 +5,7 @@ import type { AccountType } from "@/lib/books";
 import type { MatchType, UserRule } from "@/lib/categorize/engine";
 import { rowsFromCsv } from "@/lib/csv";
 import { dollarsToCents } from "@/lib/format";
-import { Activity } from "@/lib/activity";
-import { getDb } from "@/lib/db";
-import { getBooks } from "@/lib/server";
-
-const activity = () => Activity.for(getBooks(), getDb());
+import { getActivity, getBooks } from "@/lib/server";
 
 const refresh = () => revalidatePath("/", "layout");
 
@@ -31,28 +27,28 @@ export async function addTransactionAction(_prev: FormState, form: FormData): Pr
   const amountCents = direction === "in" ? Math.abs(cents) : -Math.abs(cents);
   const accountId = Number(str(form, "accountId")) || null;
   const categoryId = str(form, "categoryId") || undefined;
-  getBooks().addTransaction({ date, description, amountCents, accountId, categoryId, notes: str(form, "notes") });
+  await (await getBooks()).addTransaction({ date, description, amountCents, accountId, categoryId, notes: str(form, "notes") });
   refresh();
   return { ok: "Added." };
 }
 
 export async function setCategoryAction(form: FormData) {
-  getBooks().setCategory(Number(form.get("id")), str(form, "categoryId"), { remember: form.get("remember") === "on" });
+  await (await getBooks()).setCategory(Number(form.get("id")), str(form, "categoryId"), { remember: form.get("remember") === "on" });
   refresh();
 }
 
 export async function markReviewedAction(form: FormData) {
-  getBooks().markReviewed(Number(form.get("id")));
+  await (await getBooks()).markReviewed(Number(form.get("id")));
   refresh();
 }
 
 export async function updateNotesAction(form: FormData) {
-  getBooks().updateNotes(Number(form.get("id")), str(form, "notes"));
+  await (await getBooks()).updateNotes(Number(form.get("id")), str(form, "notes"));
   refresh();
 }
 
 export async function deleteTransactionAction(form: FormData) {
-  getBooks().deleteTransaction(Number(form.get("id")));
+  await (await getBooks()).deleteTransaction(Number(form.get("id")));
   refresh();
 }
 
@@ -70,7 +66,7 @@ export async function importCsvAction(_prev: ImportState, form: FormData): Promi
   const accountId = Number(form.get("accountId"));
   const { rows, errors } = rowsFromCsv(await file.text(), { flipSigns: form.get("flipSigns") === "on" });
   if (rows.length === 0) return { error: errors[0] ?? "No transactions found in that file." };
-  const result = getBooks().importRows(accountId, rows);
+  const result = await (await getBooks()).importRows(accountId, rows);
   refresh();
   return { ...result, skipped: errors.slice(0, 20) };
 }
@@ -78,14 +74,14 @@ export async function importCsvAction(_prev: ImportState, form: FormData): Promi
 export async function createAccountAction(_prev: FormState, form: FormData): Promise<FormState> {
   const name = str(form, "name");
   if (!name) return { error: "Name the account." };
-  getBooks().createAccount(name, (str(form, "type") || "checking") as AccountType);
+  await (await getBooks()).createAccount(name, (str(form, "type") || "checking") as AccountType);
   refresh();
   return { ok: `Added ${name}.` };
 }
 
 export async function createRuleAction(_prev: FormState, form: FormData): Promise<FormState> {
   try {
-    getBooks().createRule({
+    await (await getBooks()).createRule({
       pattern: str(form, "pattern"),
       categoryId: str(form, "categoryId"),
       matchType: (str(form, "matchType") || "contains") as MatchType,
@@ -99,23 +95,23 @@ export async function createRuleAction(_prev: FormState, form: FormData): Promis
 }
 
 export async function deleteRuleAction(form: FormData) {
-  getBooks().deleteRule(Number(form.get("id")));
+  await (await getBooks()).deleteRule(Number(form.get("id")));
   refresh();
 }
 
 export async function recategorizeAction() {
-  getBooks().recategorize();
+  await (await getBooks()).recategorize();
   refresh();
 }
 
 export async function addEventAction(_prev: FormState, form: FormData): Promise<FormState> {
   try {
-    const a = activity();
-    const id = a.addEvent({ date: str(form, "date"), kind: str(form, "kind"), title: str(form, "title"), url: str(form, "url"), notes: str(form, "notes") });
+    const a = await getActivity();
+    const id = await a.addEvent({ date: str(form, "date"), kind: str(form, "kind"), title: str(form, "title"), url: str(form, "url"), notes: str(form, "notes") });
     let msg = "Event logged.";
     const destination = str(form, "trackDestination");
     if (form.get("track") === "on") {
-      const slug = a.createLink({ destination: destination || str(form, "url"), eventId: id, slug: str(form, "slug") });
+      const slug = await a.createLink({ destination: destination || str(form, "url"), eventId: id, slug: str(form, "slug") });
       msg = `Event logged. Share /go/${slug} in your post to count clicks.`;
     }
     refresh();
@@ -126,14 +122,14 @@ export async function addEventAction(_prev: FormState, form: FormData): Promise<
 }
 
 export async function deleteEventAction(form: FormData) {
-  activity().deleteEvent(Number(form.get("id")));
+  await (await getActivity()).deleteEvent(Number(form.get("id")));
   refresh();
 }
 
 export async function logMetricAction(_prev: FormState, form: FormData): Promise<FormState> {
   try {
     const metric = str(form, "metric") === "__new" ? str(form, "newMetric") : str(form, "metric");
-    activity().logMetric({ date: str(form, "date"), metric, value: Number(str(form, "value")) });
+    await (await getActivity()).logMetric({ date: str(form, "date"), metric, value: Number(str(form, "value")) });
     refresh();
     return { ok: "Saved." };
   } catch (err) {
@@ -143,7 +139,7 @@ export async function logMetricAction(_prev: FormState, form: FormData): Promise
 
 export async function createLinkAction(_prev: FormState, form: FormData): Promise<FormState> {
   try {
-    const slug = activity().createLink({ destination: str(form, "destination"), slug: str(form, "slug"), eventId: Number(str(form, "eventId")) || null });
+    const slug = await (await getActivity()).createLink({ destination: str(form, "destination"), slug: str(form, "slug"), eventId: Number(str(form, "eventId")) || null });
     refresh();
     return { ok: `Created /go/${slug}` };
   } catch (err) {
@@ -152,6 +148,6 @@ export async function createLinkAction(_prev: FormState, form: FormData): Promis
 }
 
 export async function deleteLinkAction(form: FormData) {
-  activity().deleteLink(Number(form.get("id")));
+  await (await getActivity()).deleteLink(Number(form.get("id")));
   refresh();
 }

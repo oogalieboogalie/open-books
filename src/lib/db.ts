@@ -1,92 +1,101 @@
-import { DatabaseSync } from "node:sqlite";
-import fs from "node:fs";
 import path from "node:path";
 
 /**
- * SQLite through Node's built-in driver, so there is nothing native to compile
- * and self-hosting is one file. Schema changes are appended to MIGRATIONS and
- * applied in order on startup; never edit a migration that has shipped.
+ * Postgres everywhere. With DATABASE_URL set, the app talks to that server
+ * (Docker, a managed host, anything with Postgres 15+). Without it, an embedded
+ * Postgres (PGlite) stores data in ./data/pglite so the app runs with no setup.
+ *
+ * Schema changes are appended to MIGRATIONS and applied in order on startup;
+ * never edit a migration that has shipped.
  */
+
+export interface Db {
+  query<T = Record<string, unknown>>(sql: string, params?: unknown[]): Promise<T[]>;
+  one<T = Record<string, unknown>>(sql: string, params?: unknown[]): Promise<T | undefined>;
+  /** Runs several statements separated by semicolons, without parameters. */
+  exec(sql: string): Promise<void>;
+  transaction<T>(fn: (tx: Db) => Promise<T>): Promise<T>;
+  close(): Promise<void>;
+}
 
 const MIGRATIONS: string[] = [
   `
   CREATE TABLE businesses (
-    id INTEGER PRIMARY KEY,
+    id SERIAL PRIMARY KEY,
     name TEXT NOT NULL,
     entity_type TEXT NOT NULL DEFAULT 'sole_prop',
-    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
   );
 
   CREATE TABLE accounts (
-    id INTEGER PRIMARY KEY,
+    id SERIAL PRIMARY KEY,
     business_id INTEGER NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
     name TEXT NOT NULL,
     type TEXT NOT NULL DEFAULT 'checking',
-    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
   );
 
   CREATE TABLE rules (
-    id INTEGER PRIMARY KEY,
+    id SERIAL PRIMARY KEY,
     business_id INTEGER NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
     pattern TEXT NOT NULL,
     match_type TEXT NOT NULL DEFAULT 'contains',
     direction TEXT NOT NULL DEFAULT 'any',
     category_id TEXT NOT NULL,
-    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     UNIQUE (business_id, pattern, match_type, direction)
   );
 
   CREATE TABLE transactions (
-    id INTEGER PRIMARY KEY,
+    id SERIAL PRIMARY KEY,
     business_id INTEGER NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
     account_id INTEGER REFERENCES accounts(id) ON DELETE SET NULL,
-    date TEXT NOT NULL,
+    date DATE NOT NULL,
     description TEXT NOT NULL,
     merchant_key TEXT NOT NULL DEFAULT '',
-    amount_cents INTEGER NOT NULL,
+    amount_cents BIGINT NOT NULL,
     category_id TEXT NOT NULL DEFAULT 'uncategorized',
     category_source TEXT NOT NULL DEFAULT 'fallback',
-    confidence REAL NOT NULL DEFAULT 0,
+    confidence DOUBLE PRECISION NOT NULL DEFAULT 0,
     reason TEXT NOT NULL DEFAULT '',
     rule_id INTEGER REFERENCES rules(id) ON DELETE SET NULL,
-    needs_review INTEGER NOT NULL DEFAULT 1,
+    needs_review BOOLEAN NOT NULL DEFAULT true,
     notes TEXT NOT NULL DEFAULT '',
     import_hash TEXT,
-    created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
   );
 
   CREATE INDEX idx_tx_business_date ON transactions (business_id, date);
   CREATE INDEX idx_tx_business_category ON transactions (business_id, category_id);
   CREATE UNIQUE INDEX idx_tx_import_hash ON transactions (business_id, import_hash) WHERE import_hash IS NOT NULL;
-  `,
-  // 2: things that happened (a social post, a promo) and daily numbers (contacts,
-  // appointments), so they can be lined up against the money on one timeline.
-  `
+
+  -- Things that happened (a social post, a promo) and daily numbers (contacts,
+  -- appointments), so they can be lined up against the money on one timeline.
   CREATE TABLE events (
-    id INTEGER PRIMARY KEY,
+    id SERIAL PRIMARY KEY,
     business_id INTEGER NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
-    date TEXT NOT NULL,
+    date DATE NOT NULL,
     kind TEXT NOT NULL DEFAULT 'other',
     title TEXT NOT NULL,
     url TEXT NOT NULL DEFAULT '',
     notes TEXT NOT NULL DEFAULT '',
-    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
   );
   CREATE INDEX idx_events_business_date ON events (business_id, date);
 
   CREATE TABLE metric_entries (
-    id INTEGER PRIMARY KEY,
+    id SERIAL PRIMARY KEY,
     business_id INTEGER NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
-    date TEXT NOT NULL,
+    date DATE NOT NULL,
     metric TEXT NOT NULL,
-    value REAL NOT NULL,
-    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    value DOUBLE PRECISION NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     UNIQUE (business_id, date, metric)
   );
 
   CREATE TABLE custom_metrics (
-    id INTEGER PRIMARY KEY,
+    id SERIAL PRIMARY KEY,
     business_id INTEGER NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
     key TEXT NOT NULL,
     name TEXT NOT NULL,
@@ -94,67 +103,132 @@ const MIGRATIONS: string[] = [
   );
 
   CREATE TABLE tracked_links (
-    id INTEGER PRIMARY KEY,
+    id SERIAL PRIMARY KEY,
     business_id INTEGER NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
     slug TEXT NOT NULL UNIQUE,
     destination TEXT NOT NULL,
     event_id INTEGER REFERENCES events(id) ON DELETE SET NULL,
-    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
   );
 
   CREATE TABLE link_clicks (
-    id INTEGER PRIMARY KEY,
+    id BIGSERIAL PRIMARY KEY,
     link_id INTEGER NOT NULL REFERENCES tracked_links(id) ON DELETE CASCADE,
-    clicked_at TEXT NOT NULL DEFAULT (datetime('now'))
+    clicked_at TIMESTAMPTZ NOT NULL DEFAULT now()
   );
   CREATE INDEX idx_link_clicks_link_time ON link_clicks (link_id, clicked_at);
   `,
 ];
 
-function migrate(db: DatabaseSync) {
-  db.exec("CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL DEFAULT (datetime('now')))");
-  const row = db.prepare("SELECT COALESCE(MAX(version), 0) AS v FROM schema_migrations").get() as { v: number };
-  for (let v = row.v; v < MIGRATIONS.length; v++) {
-    db.exec("BEGIN");
-    try {
-      db.exec(MIGRATIONS[v]);
-      db.prepare("INSERT INTO schema_migrations (version) VALUES (?)").run(v + 1);
-      db.exec("COMMIT");
-    } catch (err) {
-      db.exec("ROLLBACK");
-      throw err;
+// Return dates as 'YYYY-MM-DD', timestamps as ISO-ish strings, and int8/numeric
+// as numbers, from both drivers. Cents fit comfortably in a JS number.
+const OID = { int8: 20, numeric: 1700, date: 1082, timestamp: 1114, timestamptz: 1184 };
+const PARSERS: Record<number, (v: string) => unknown> = {
+  [OID.int8]: (v) => Number(v),
+  [OID.numeric]: (v) => Number(v),
+  [OID.date]: (v) => v,
+  [OID.timestamp]: (v) => v,
+  [OID.timestamptz]: (v) => v,
+};
+
+async function migrate(db: Db) {
+  await db.transaction(async (tx) => {
+    // Serialize concurrent starts (several app processes against one database).
+    await tx.query("SELECT pg_advisory_xact_lock(727274)");
+    await tx.exec("CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now())");
+    const row = await tx.one<{ v: number }>("SELECT COALESCE(MAX(version), 0)::int AS v FROM schema_migrations");
+    for (let v = row?.v ?? 0; v < MIGRATIONS.length; v++) {
+      await tx.exec(MIGRATIONS[v]);
+      await tx.query("INSERT INTO schema_migrations (version) VALUES ($1)", [v + 1]);
     }
-  }
+  });
 }
 
-export function openDatabase(file: string): DatabaseSync {
-  if (file !== ":memory:") fs.mkdirSync(path.dirname(file), { recursive: true });
-  const db = new DatabaseSync(file);
-  db.exec("PRAGMA foreign_keys = ON");
-  if (file !== ":memory:") db.exec("PRAGMA journal_mode = WAL");
-  migrate(db);
+async function openPg(url: string): Promise<Db> {
+  const pg = await import("pg");
+  const Pool = pg.default?.Pool ?? pg.Pool;
+  const types = pg.default?.types ?? pg.types;
+  const pool = new Pool({ connectionString: url, max: Number(process.env.DATABASE_POOL_SIZE ?? 10) });
+  for (const [oid, parse] of Object.entries(PARSERS)) types.setTypeParser(Number(oid), parse);
+
+  type Queryable = { query: (sql: string, params?: unknown[]) => Promise<{ rows: unknown[] }> };
+  const wrap = (q: Queryable, tx: Db["transaction"]): Db => ({
+    query: async <T,>(sql: string, params: unknown[] = []) => (await q.query(sql, params)).rows as T[],
+    one: async <T,>(sql: string, params: unknown[] = []) => (await q.query(sql, params)).rows[0] as T | undefined,
+    exec: async (sql: string) => {
+      await q.query(sql);
+    },
+    transaction: tx,
+    close: async () => pool.end(),
+  });
+
+  const transaction = async <T,>(fn: (tx: Db) => Promise<T>): Promise<T> => {
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      // Nested calls run inside the same transaction.
+      const inner: Db = wrap(client, (f) => f(inner));
+      const result = await fn(inner);
+      await client.query("COMMIT");
+      return result;
+    } catch (err) {
+      await client.query("ROLLBACK");
+      throw err;
+    } finally {
+      client.release();
+    }
+  };
+  return wrap(pool, transaction);
+}
+
+async function openPglite(dataDir: string | undefined): Promise<Db> {
+  const { PGlite } = await import("@electric-sql/pglite");
+  const pglite = await PGlite.create({ dataDir, parsers: PARSERS });
+
+  type Queryable = { query: <R>(sql: string, params?: unknown[]) => Promise<{ rows: R[] }>; exec: (sql: string) => Promise<unknown> };
+  const wrap = (q: Queryable, tx: Db["transaction"]): Db => ({
+    query: async <T,>(sql: string, params: unknown[] = []) => (await q.query<T>(sql, params)).rows,
+    one: async <T,>(sql: string, params: unknown[] = []) => (await q.query<T>(sql, params)).rows[0],
+    exec: async (sql: string) => {
+      await q.exec(sql);
+    },
+    transaction: tx,
+    close: async () => pglite.close(),
+  });
+
+  const transaction = <T,>(fn: (tx: Db) => Promise<T>): Promise<T> =>
+    pglite.transaction(async (t) => {
+      const inner: Db = wrap(t as unknown as Queryable, (f) => f(inner));
+      return fn(inner);
+    }) as Promise<T>;
+  return wrap(pglite as unknown as Queryable, transaction);
+}
+
+/**
+ * Opens a database: a postgres:// URL, a directory for embedded Postgres, or
+ * "memory" for a throwaway in-memory database (used by tests).
+ */
+export async function openDatabase(target: string): Promise<Db> {
+  const db = /^postgres(ql)?:\/\//.test(target) ? await openPg(target) : await openPglite(target === "memory" ? undefined : target);
+  await migrate(db);
   return db;
 }
 
-const globalForDb = globalThis as unknown as { __openBooksDb?: DatabaseSync };
+const globalForDb = globalThis as unknown as { __openBooksDb?: Promise<Db> };
 
-/** The app's shared connection. Path comes from BOOKS_DB_PATH (default ./data/books.db). */
-export function getDb(): DatabaseSync {
+/** The app's shared database: DATABASE_URL, else embedded Postgres in PGLITE_DIR or ./data/pglite. */
+export function getDb(): Promise<Db> {
   if (!globalForDb.__openBooksDb) {
-    const file = process.env.BOOKS_DB_PATH ?? path.join(process.cwd(), "data", "books.db");
-    globalForDb.__openBooksDb = openDatabase(file);
+    const target = process.env.DATABASE_URL || process.env.PGLITE_DIR || path.join(process.cwd(), "data", "pglite");
+    globalForDb.__openBooksDb = openDatabase(target).catch((err) => {
+      globalForDb.__openBooksDb = undefined;
+      throw err;
+    });
   }
   return globalForDb.__openBooksDb;
 }
 
-export function transaction<T>(db: DatabaseSync, fn: () => T): T {
-  db.exec("BEGIN");
-  try {
-    const result = fn();
-    db.exec("COMMIT");
-    return result;
-  } catch (err) {
-    db.exec("ROLLBACK");
-    throw err;
-  }
+/** IANA timezone used to decide which day a timestamp (like a link click) falls on. */
+export function businessTimeZone(): string {
+  return process.env.BUSINESS_TZ || Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
 }

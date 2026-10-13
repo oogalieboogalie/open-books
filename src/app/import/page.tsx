@@ -3,8 +3,8 @@ import { AccountForm, ImportForm } from "../components/Forms";
 
 export const dynamic = "force-dynamic";
 
-export default function ImportPage() {
-  const accounts = getBooks().listAccounts();
+export default async function ImportPage() {
+  const accounts = await (await getBooks()).listAccounts();
   return (
     <>
       <div className="page-head">

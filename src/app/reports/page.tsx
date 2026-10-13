@@ -7,11 +7,11 @@ import { YearPicker } from "../components/YearPicker";
 export const dynamic = "force-dynamic";
 
 export default async function ReportsPage({ searchParams }: { searchParams: Promise<{ year?: string }> }) {
-  const books = getBooks();
-  const years = books.years();
+  const books = await getBooks();
+  const years = await books.years();
   const year = pickYear((await searchParams).year, years);
-  const s = buildScheduleC(books.categoryTotals(year), year);
-  const review = books.reviewCount();
+  const s = buildScheduleC(await books.categoryTotals(year), year);
+  const review = await books.reviewCount();
 
   return (
     <>

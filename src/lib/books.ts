@@ -1,10 +1,9 @@
 import { createHash } from "node:crypto";
-import type { DatabaseSync, SQLInputValue } from "node:sqlite";
 import { getCategory, isCategoryId } from "./categories";
 import { categorize, defaultClassifiers, REVIEW_THRESHOLD, type MatchType, type Suggestion, type UserRule } from "./categorize/engine";
 import { merchantKey, normalizeDescription } from "./categorize/normalize";
 import type { ImportedRow } from "./csv";
-import { transaction } from "./db";
+import type { Db } from "./db";
 
 export const ACCOUNT_TYPES = ["checking", "savings", "credit_card", "cash", "other"] as const;
 export type AccountType = (typeof ACCOUNT_TYPES)[number];
@@ -53,88 +52,66 @@ export interface NewTransaction {
   notes?: string;
 }
 
-interface TxRow {
-  id: number;
-  account_id: number | null;
-  account_name: string | null;
-  date: string;
-  description: string;
-  merchant_key: string;
-  amount_cents: number;
-  category_id: string;
-  category_source: Transaction["categorySource"];
-  confidence: number;
-  reason: string;
-  needs_review: number;
-  notes: string;
-}
-
-const toTransaction = (r: TxRow): Transaction => ({
-  id: r.id,
-  accountId: r.account_id,
-  accountName: r.account_name,
-  date: r.date,
-  description: r.description,
-  merchantKey: r.merchant_key,
-  amountCents: r.amount_cents,
-  categoryId: r.category_id,
-  categorySource: r.category_source,
-  confidence: r.confidence,
-  reason: r.reason,
-  needsReview: r.needs_review === 1,
-  notes: r.notes,
-});
+const TX_COLUMNS = `t.id, t.account_id AS "accountId", a.name AS "accountName", t.date, t.description, t.merchant_key AS "merchantKey",
+  t.amount_cents AS "amountCents", t.category_id AS "categoryId", t.category_source AS "categorySource", t.confidence, t.reason,
+  t.needs_review AS "needsReview", t.notes`;
 
 /**
  * All bookkeeping reads and writes for one business. Every query is scoped by
- * business id so the same database can later hold many businesses and users.
+ * business id so the same database can hold many businesses and users.
  */
 export class Books {
   constructor(
-    private db: DatabaseSync,
+    readonly db: Db,
     readonly businessId: number,
   ) {}
 
-  static forDefaultBusiness(db: DatabaseSync): Books {
-    const existing = db.prepare("SELECT id FROM businesses ORDER BY id LIMIT 1").get() as { id: number } | undefined;
-    if (existing) return new Books(db, existing.id);
-    const res = db.prepare("INSERT INTO businesses (name) VALUES (?)").run("My Business");
-    const books = new Books(db, Number(res.lastInsertRowid));
-    books.createAccount("Business checking", "checking");
-    return books;
+  static async forDefaultBusiness(db: Db): Promise<Books> {
+    return db.transaction(async (tx) => {
+      await tx.query("SELECT pg_advisory_xact_lock(727275)");
+      const existing = await tx.one<{ id: number }>("SELECT id FROM businesses ORDER BY id LIMIT 1");
+      if (existing) return new Books(db, existing.id);
+      const created = await tx.one<{ id: number }>("INSERT INTO businesses (name) VALUES ('My Business') RETURNING id");
+      await new Books(tx, created!.id).createAccount("Business checking", "checking");
+      return new Books(db, created!.id);
+    });
+  }
+
+  /** Runs `fn` with a Books bound to a single database transaction. */
+  private inTransaction<T>(fn: (books: Books) => Promise<T>): Promise<T> {
+    return this.db.transaction((tx) => fn(new Books(tx, this.businessId)));
   }
 
   // Accounts
 
-  listAccounts(): Account[] {
-    // node:sqlite returns null-prototype rows; copy them into plain objects so they can cross into client components.
-    return this.db.prepare("SELECT id, name, type FROM accounts WHERE business_id = ? ORDER BY id").all(this.businessId).map((r) => ({ ...r }) as unknown as Account);
+  listAccounts(): Promise<Account[]> {
+    return this.db.query<Account>("SELECT id, name, type FROM accounts WHERE business_id = $1 ORDER BY id", [this.businessId]);
   }
 
-  createAccount(name: string, type: AccountType): number {
+  async createAccount(name: string, type: AccountType): Promise<number> {
     if (!ACCOUNT_TYPES.includes(type)) throw new Error("Unknown account type");
-    const res = this.db.prepare("INSERT INTO accounts (business_id, name, type) VALUES (?, ?, ?)").run(this.businessId, name.trim(), type);
-    return Number(res.lastInsertRowid);
+    const row = await this.db.one<{ id: number }>("INSERT INTO accounts (business_id, name, type) VALUES ($1, $2, $3) RETURNING id", [this.businessId, name.trim(), type]);
+    return row!.id;
   }
 
-  private assertAccount(accountId: number | null | undefined): number | null {
+  private async assertAccount(accountId: number | null | undefined): Promise<number | null> {
     if (accountId == null) return null;
-    const row = this.db.prepare("SELECT id FROM accounts WHERE id = ? AND business_id = ?").get(accountId, this.businessId);
+    const row = await this.db.one("SELECT id FROM accounts WHERE id = $1 AND business_id = $2", [accountId, this.businessId]);
     if (!row) throw new Error("Account not found");
     return accountId;
   }
 
   // Rules
 
-  listRules(): UserRule[] {
-    return this.db
-      .prepare("SELECT id, pattern, match_type AS matchType, direction, category_id AS categoryId FROM rules WHERE business_id = ? ORDER BY pattern")
-      .all(this.businessId)
-      .map((r) => ({ ...r }) as unknown as UserRule);
+  listRules(): Promise<UserRule[]> {
+    return this.db.query<UserRule>(
+      `SELECT id, pattern, match_type AS "matchType", direction, category_id AS "categoryId" FROM rules WHERE business_id = $1 ORDER BY pattern`,
+      [this.businessId],
+    );
   }
 
   /** Creates (or updates) a rule and applies it to every transaction the user has not categorized by hand. */
-  createRule(input: { pattern: string; categoryId: string; matchType?: MatchType; direction?: UserRule["direction"] }): number {
+  async createRule(input: { pattern: string; categoryId: string; matchType?: MatchType; direction?: UserRule["direction"] }): Promise<number> {
     if (!isCategoryId(input.categoryId)) throw new Error("Unknown category");
     const pattern = normalizeDescription(input.pattern);
     if (!pattern) throw new Error("Pattern is empty");
@@ -142,128 +119,105 @@ export class Books {
     const direction = input.direction ?? "any";
     if (!["contains", "starts_with", "exact"].includes(matchType)) throw new Error("Unknown match type");
     if (!["any", "in", "out"].includes(direction)) throw new Error("Unknown direction");
-    const row = this.db
-      .prepare(
-        `INSERT INTO rules (business_id, pattern, match_type, direction, category_id) VALUES (?, ?, ?, ?, ?)
+    return this.inTransaction(async (books) => {
+      const row = await books.db.one<{ id: number }>(
+        `INSERT INTO rules (business_id, pattern, match_type, direction, category_id) VALUES ($1, $2, $3, $4, $5)
          ON CONFLICT (business_id, pattern, match_type, direction) DO UPDATE SET category_id = excluded.category_id
          RETURNING id`,
-      )
-      .get(this.businessId, pattern, matchType, direction, input.categoryId) as { id: number };
-    this.recategorize();
-    return row.id;
+        [this.businessId, pattern, matchType, direction, input.categoryId],
+      );
+      await books.recategorize();
+      return row!.id;
+    });
   }
 
-  deleteRule(id: number) {
-    this.db.prepare("DELETE FROM rules WHERE id = ? AND business_id = ?").run(id, this.businessId);
-    this.recategorize();
+  async deleteRule(id: number): Promise<void> {
+    await this.inTransaction(async (books) => {
+      await books.db.query("DELETE FROM rules WHERE id = $1 AND business_id = $2", [id, this.businessId]);
+      await books.recategorize();
+    });
   }
 
-  suggest(description: string, amountCents: number): Suggestion {
-    return categorize({ description, amountCents }, defaultClassifiers(this.listRules()));
+  async suggest(description: string, amountCents: number): Promise<Suggestion> {
+    return categorize({ description, amountCents }, defaultClassifiers(await this.listRules()));
   }
 
   /** Re-runs categorization on everything not set by hand. Returns how many changed. */
-  recategorize(): number {
-    const classifiers = defaultClassifiers(this.listRules());
-    const rows = this.db
-      .prepare("SELECT id, description, amount_cents, category_id, rule_id, confidence FROM transactions WHERE business_id = ? AND category_source != 'user'")
-      .all(this.businessId) as { id: number; description: string; amount_cents: number; category_id: string; rule_id: number | null; confidence: number }[];
-    const update = this.db.prepare(
-      "UPDATE transactions SET category_id = ?, category_source = ?, confidence = ?, reason = ?, rule_id = ?, needs_review = ?, updated_at = datetime('now') WHERE id = ?",
+  async recategorize(): Promise<number> {
+    const classifiers = defaultClassifiers(await this.listRules());
+    const rows = await this.db.query<{ id: number; description: string; amount_cents: number; category_id: string; rule_id: number | null; confidence: number }>(
+      "SELECT id, description, amount_cents, category_id, rule_id, confidence FROM transactions WHERE business_id = $1 AND category_source <> 'user'",
+      [this.businessId],
     );
     let changed = 0;
-    transaction(this.db, () => {
-      for (const r of rows) {
-        const s = categorize({ description: r.description, amountCents: r.amount_cents }, classifiers);
-        if (s.categoryId === r.category_id && (s.ruleId ?? null) === r.rule_id && s.confidence === r.confidence) continue;
-        update.run(s.categoryId, s.source, s.confidence, s.reason, s.ruleId ?? null, s.confidence < REVIEW_THRESHOLD ? 1 : 0, r.id);
-        changed++;
-      }
-    });
+    for (const r of rows) {
+      const s = categorize({ description: r.description, amountCents: r.amount_cents }, classifiers);
+      if (s.categoryId === r.category_id && (s.ruleId ?? null) === r.rule_id && s.confidence === r.confidence) continue;
+      await this.db.query(
+        "UPDATE transactions SET category_id = $1, category_source = $2, confidence = $3, reason = $4, rule_id = $5, needs_review = $6, updated_at = now() WHERE id = $7",
+        [s.categoryId, s.source, s.confidence, s.reason, s.ruleId ?? null, s.confidence < REVIEW_THRESHOLD, r.id],
+      );
+      changed++;
+    }
     return changed;
   }
 
   // Transactions
 
-  listTransactions(filter: TransactionFilter = {}): { rows: Transaction[]; total: number } {
-    const where = ["t.business_id = ?"];
-    const params: SQLInputValue[] = [this.businessId];
-    if (filter.year) {
-      where.push("t.date >= ? AND t.date < ?");
-      params.push(`${filter.year}-01-01`, `${filter.year + 1}-01-01`);
-    }
-    if (filter.from) {
-      where.push("t.date >= ?");
-      params.push(filter.from);
-    }
-    if (filter.to) {
-      where.push("t.date <= ?");
-      params.push(filter.to);
-    }
-    if (filter.categoryId) {
-      where.push("t.category_id = ?");
-      params.push(filter.categoryId);
-    }
-    if (filter.needsReview) where.push("t.needs_review = 1");
-    if (filter.accountId) {
-      where.push("t.account_id = ?");
-      params.push(filter.accountId);
-    }
+  async listTransactions(filter: TransactionFilter = {}): Promise<{ rows: Transaction[]; total: number }> {
+    const params: unknown[] = [this.businessId];
+    const p = (v: unknown) => {
+      params.push(v);
+      return `$${params.length}`;
+    };
+    const where = ["t.business_id = $1"];
+    if (filter.year) where.push(`t.date >= ${p(`${filter.year}-01-01`)} AND t.date < ${p(`${filter.year + 1}-01-01`)}`);
+    if (filter.from) where.push(`t.date >= ${p(filter.from)}`);
+    if (filter.to) where.push(`t.date <= ${p(filter.to)}`);
+    if (filter.categoryId) where.push(`t.category_id = ${p(filter.categoryId)}`);
+    if (filter.needsReview) where.push("t.needs_review");
+    if (filter.accountId) where.push(`t.account_id = ${p(filter.accountId)}`);
     if (filter.search) {
-      where.push("(t.description LIKE ? OR t.notes LIKE ?)");
-      params.push(`%${filter.search}%`, `%${filter.search}%`);
+      const term = p(`%${filter.search}%`);
+      where.push(`(t.description ILIKE ${term} OR t.notes ILIKE ${term})`);
     }
     const whereSql = where.join(" AND ");
-    const total = (this.db.prepare(`SELECT COUNT(*) AS n FROM transactions t WHERE ${whereSql}`).get(...params) as { n: number }).n;
-    const rows = this.db
-      .prepare(
-        `SELECT t.*, a.name AS account_name FROM transactions t LEFT JOIN accounts a ON a.id = t.account_id
-         WHERE ${whereSql} ORDER BY t.date DESC, t.id DESC LIMIT ? OFFSET ?`,
-      )
-      .all(...params, filter.limit ?? 100, filter.offset ?? 0) as unknown as TxRow[];
-    return { rows: rows.map(toTransaction), total };
+    const total = (await this.db.one<{ n: number }>(`SELECT COUNT(*)::int AS n FROM transactions t WHERE ${whereSql}`, params))!.n;
+    const rows = await this.db.query<Transaction>(
+      `SELECT ${TX_COLUMNS} FROM transactions t LEFT JOIN accounts a ON a.id = t.account_id
+       WHERE ${whereSql} ORDER BY t.date DESC, t.id DESC LIMIT ${p(filter.limit ?? 100)} OFFSET ${p(filter.offset ?? 0)}`,
+      params,
+    );
+    return { rows, total };
   }
 
-  getTransaction(id: number): Transaction | null {
-    const row = this.db
-      .prepare("SELECT t.*, a.name AS account_name FROM transactions t LEFT JOIN accounts a ON a.id = t.account_id WHERE t.id = ? AND t.business_id = ?")
-      .get(id, this.businessId) as TxRow | undefined;
-    return row ? toTransaction(row) : null;
+  async getTransaction(id: number): Promise<Transaction | null> {
+    const row = await this.db.one<Transaction>(
+      `SELECT ${TX_COLUMNS} FROM transactions t LEFT JOIN accounts a ON a.id = t.account_id WHERE t.id = $1 AND t.business_id = $2`,
+      [id, this.businessId],
+    );
+    return row ?? null;
   }
 
-  addTransaction(input: NewTransaction, importHash: string | null = null): number | null {
-    const accountId = this.assertAccount(input.accountId);
+  /** Adds a transaction, categorizing it unless a category is given. Returns null if it was a duplicate import. */
+  async addTransaction(input: NewTransaction, importHash: string | null = null, rules?: UserRule[]): Promise<{ id: number; needsReview: boolean } | null> {
+    const accountId = await this.assertAccount(input.accountId);
     const description = input.description.trim();
-    let s: Suggestion | { categoryId: string; source: "user"; confidence: number; reason: string; ruleId?: undefined };
+    let s: Pick<Suggestion, "categoryId" | "confidence" | "reason" | "ruleId"> & { source: Transaction["categorySource"] };
     if (input.categoryId && input.categoryId !== "uncategorized") {
       if (!isCategoryId(input.categoryId)) throw new Error("Unknown category");
       s = { categoryId: input.categoryId, source: "user", confidence: 1, reason: "Set by you" };
     } else {
-      s = this.suggest(description, input.amountCents);
+      s = categorize({ description, amountCents: input.amountCents }, defaultClassifiers(rules ?? (await this.listRules())));
     }
-    const res = this.db
-      .prepare(
-        `INSERT INTO transactions (business_id, account_id, date, description, merchant_key, amount_cents, category_id, category_source, confidence, reason, rule_id, needs_review, notes, import_hash)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT DO NOTHING`,
-      )
-      .run(
-        this.businessId,
-        accountId,
-        input.date,
-        description,
-        merchantKey(description),
-        input.amountCents,
-        s.categoryId,
-        s.source,
-        s.confidence,
-        s.reason,
-        s.ruleId ?? null,
-        s.confidence < REVIEW_THRESHOLD ? 1 : 0,
-        input.notes ?? "",
-        importHash,
-      );
-    return res.changes === 0 ? null : Number(res.lastInsertRowid);
+    const needsReview = s.confidence < REVIEW_THRESHOLD;
+    const row = await this.db.one<{ id: number }>(
+      `INSERT INTO transactions (business_id, account_id, date, description, merchant_key, amount_cents, category_id, category_source, confidence, reason, rule_id, needs_review, notes, import_hash)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+       ON CONFLICT DO NOTHING RETURNING id`,
+      [this.businessId, accountId, input.date, description, merchantKey(description), input.amountCents, s.categoryId, s.source, s.confidence, s.reason, s.ruleId ?? null, needsReview, input.notes ?? "", importHash],
+    );
+    return row ? { id: row.id, needsReview } : null;
   }
 
   /**
@@ -271,81 +225,85 @@ export class Books {
    * range) skips rows already present, including legitimately repeated rows such
    * as two identical coffees on the same day.
    */
-  importRows(accountId: number, rows: ImportedRow[]): { imported: number; duplicates: number; needsReview: number } {
-    this.assertAccount(accountId);
-    const seen = new Map<string, number>();
-    let imported = 0;
-    let duplicates = 0;
-    let needsReview = 0;
-    transaction(this.db, () => {
+  async importRows(accountId: number, rows: ImportedRow[]): Promise<{ imported: number; duplicates: number; needsReview: number }> {
+    await this.assertAccount(accountId);
+    return this.inTransaction(async (books) => {
+      const rules = await books.listRules();
+      const seen = new Map<string, number>();
+      let imported = 0;
+      let duplicates = 0;
+      let needsReview = 0;
       for (const row of rows) {
         const base = `${accountId}|${row.date}|${row.amountCents}|${normalizeDescription(row.description)}`;
         const occurrence = (seen.get(base) ?? 0) + 1;
         seen.set(base, occurrence);
         const hash = createHash("sha256").update(`${base}|${occurrence}`).digest("hex");
-        const id = this.addTransaction({ ...row, accountId }, hash);
-        if (id === null) {
+        const added = await books.addTransaction({ ...row, accountId }, hash, rules);
+        if (!added) {
           duplicates++;
         } else {
           imported++;
-          if (this.getTransaction(id)?.needsReview) needsReview++;
+          if (added.needsReview) needsReview++;
         }
       }
+      return { imported, duplicates, needsReview };
     });
-    return { imported, duplicates, needsReview };
   }
 
   /**
    * Sets a category by hand. With `remember`, also creates a rule for this
    * merchant so future and existing matching transactions follow it.
    */
-  setCategory(id: number, categoryId: string, opts: { remember?: boolean } = {}): { ruleId?: number } {
+  async setCategory(id: number, categoryId: string, opts: { remember?: boolean } = {}): Promise<{ ruleId?: number }> {
     if (!isCategoryId(categoryId)) throw new Error("Unknown category");
-    const tx = this.getTransaction(id);
+    const tx = await this.getTransaction(id);
     if (!tx) throw new Error("Transaction not found");
-    this.db
-      .prepare(
-        "UPDATE transactions SET category_id = ?, category_source = 'user', confidence = 1, reason = 'Set by you', rule_id = NULL, needs_review = 0, updated_at = datetime('now') WHERE id = ? AND business_id = ?",
-      )
-      .run(categoryId, id, this.businessId);
+    await this.db.query(
+      "UPDATE transactions SET category_id = $1, category_source = 'user', confidence = 1, reason = 'Set by you', rule_id = NULL, needs_review = false, updated_at = now() WHERE id = $2 AND business_id = $3",
+      [categoryId, id, this.businessId],
+    );
     if (opts.remember && tx.merchantKey && categoryId !== "uncategorized") {
       const kind = getCategory(categoryId).kind;
       // Income and expense rules only fire in the matching direction, so a refund
       // from a vendor is not mistaken for sales and vice versa.
       const direction = kind === "income" ? "in" : kind === "non_pl" ? "any" : tx.amountCents < 0 ? "out" : "any";
-      return { ruleId: this.createRule({ pattern: tx.merchantKey, categoryId, direction }) };
+      return { ruleId: await this.createRule({ pattern: tx.merchantKey, categoryId, direction }) };
     }
     return {};
   }
 
-  markReviewed(id: number) {
-    this.db.prepare("UPDATE transactions SET needs_review = 0, updated_at = datetime('now') WHERE id = ? AND business_id = ?").run(id, this.businessId);
+  async markReviewed(id: number): Promise<void> {
+    await this.db.query("UPDATE transactions SET needs_review = false, updated_at = now() WHERE id = $1 AND business_id = $2", [id, this.businessId]);
   }
 
-  updateNotes(id: number, notes: string) {
-    this.db.prepare("UPDATE transactions SET notes = ?, updated_at = datetime('now') WHERE id = ? AND business_id = ?").run(notes, id, this.businessId);
+  async updateNotes(id: number, notes: string): Promise<void> {
+    await this.db.query("UPDATE transactions SET notes = $1, updated_at = now() WHERE id = $2 AND business_id = $3", [notes, id, this.businessId]);
   }
 
-  deleteTransaction(id: number) {
-    this.db.prepare("DELETE FROM transactions WHERE id = ? AND business_id = ?").run(id, this.businessId);
+  async deleteTransaction(id: number): Promise<void> {
+    await this.db.query("DELETE FROM transactions WHERE id = $1 AND business_id = $2", [id, this.businessId]);
   }
 
   // Reporting
 
   /** Signed totals per category for a year. */
-  categoryTotals(year: number): Map<string, number> {
-    const rows = this.db
-      .prepare("SELECT category_id, SUM(amount_cents) AS total FROM transactions WHERE business_id = ? AND date >= ? AND date < ? GROUP BY category_id")
-      .all(this.businessId, `${year}-01-01`, `${year + 1}-01-01`) as { category_id: string; total: number }[];
+  async categoryTotals(year: number): Promise<Map<string, number>> {
+    const rows = await this.db.query<{ category_id: string; total: number }>(
+      "SELECT category_id, SUM(amount_cents)::bigint AS total FROM transactions WHERE business_id = $1 AND date >= $2 AND date < $3 GROUP BY category_id",
+      [this.businessId, `${year}-01-01`, `${year + 1}-01-01`],
+    );
     return new Map(rows.map((r) => [r.category_id, r.total]));
   }
 
-  reviewCount(): number {
-    return (this.db.prepare("SELECT COUNT(*) AS n FROM transactions WHERE business_id = ? AND needs_review = 1").get(this.businessId) as { n: number }).n;
+  async reviewCount(): Promise<number> {
+    return (await this.db.one<{ n: number }>("SELECT COUNT(*)::int AS n FROM transactions WHERE business_id = $1 AND needs_review", [this.businessId]))!.n;
   }
 
-  years(): number[] {
-    const rows = this.db.prepare("SELECT DISTINCT CAST(substr(date, 1, 4) AS INTEGER) AS y FROM transactions WHERE business_id = ? ORDER BY y DESC").all(this.businessId) as { y: number }[];
+  async years(): Promise<number[]> {
+    const rows = await this.db.query<{ y: number }>(
+      "SELECT DISTINCT EXTRACT(YEAR FROM date)::int AS y FROM transactions WHERE business_id = $1 ORDER BY y DESC",
+      [this.businessId],
+    );
     return rows.map((r) => r.y);
   }
 }
