@@ -11,7 +11,9 @@ export const dynamic = "force-dynamic";
 
 const PAGE_SIZE = 100;
 
-type Params = { year?: string; category?: string; review?: string; q?: string; account?: string; page?: string };
+type Params = { year?: string; category?: string; review?: string; q?: string; account?: string; page?: string; from?: string; to?: string };
+
+const ISO = /^\d{4}-\d{2}-\d{2}$/;
 
 export default async function TransactionsPage({ searchParams }: { searchParams: Promise<Params> }) {
   const params = await searchParams;
@@ -23,6 +25,8 @@ export default async function TransactionsPage({ searchParams }: { searchParams:
   const accounts = books.listAccounts();
   const { rows, total } = books.listTransactions({
     year,
+    from: params.from && ISO.test(params.from) ? params.from : undefined,
+    to: params.to && ISO.test(params.to) ? params.to : undefined,
     categoryId: params.category || undefined,
     needsReview,
     search: params.q || undefined,
@@ -40,7 +44,8 @@ export default async function TransactionsPage({ searchParams }: { searchParams:
           <h1>Transactions</h1>
           <p className="muted">
             {total} transaction{total === 1 ? "" : "s"}
-            {needsReview ? " to review" : ""}. Change a category and Open Books remembers it for that merchant.
+            {needsReview ? " to review" : ""}
+            {params.from && params.to ? ` from ${shortDate(params.from)} to ${shortDate(params.to)}` : ""}. Change a category and Open Books remembers it for that merchant.
           </p>
         </div>
       </div>
@@ -69,7 +74,7 @@ export default async function TransactionsPage({ searchParams }: { searchParams:
           <input type="checkbox" name="review" value="1" defaultChecked={needsReview} /> Needs review only
         </label>
         <button type="submit" className="secondary">Filter</button>
-        {(params.category || params.q || needsReview || params.account) && <Link href="/transactions">Clear</Link>}
+        {(params.category || params.q || needsReview || params.account || params.from) && <Link href="/transactions">Clear</Link>}
       </form>
 
       <div className="card table-wrap">

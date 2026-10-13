@@ -60,6 +60,55 @@ const MIGRATIONS: string[] = [
   CREATE INDEX idx_tx_business_category ON transactions (business_id, category_id);
   CREATE UNIQUE INDEX idx_tx_import_hash ON transactions (business_id, import_hash) WHERE import_hash IS NOT NULL;
   `,
+  // 2: things that happened (a social post, a promo) and daily numbers (contacts,
+  // appointments), so they can be lined up against the money on one timeline.
+  `
+  CREATE TABLE events (
+    id INTEGER PRIMARY KEY,
+    business_id INTEGER NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
+    date TEXT NOT NULL,
+    kind TEXT NOT NULL DEFAULT 'other',
+    title TEXT NOT NULL,
+    url TEXT NOT NULL DEFAULT '',
+    notes TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+  CREATE INDEX idx_events_business_date ON events (business_id, date);
+
+  CREATE TABLE metric_entries (
+    id INTEGER PRIMARY KEY,
+    business_id INTEGER NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
+    date TEXT NOT NULL,
+    metric TEXT NOT NULL,
+    value REAL NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (business_id, date, metric)
+  );
+
+  CREATE TABLE custom_metrics (
+    id INTEGER PRIMARY KEY,
+    business_id INTEGER NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
+    key TEXT NOT NULL,
+    name TEXT NOT NULL,
+    UNIQUE (business_id, key)
+  );
+
+  CREATE TABLE tracked_links (
+    id INTEGER PRIMARY KEY,
+    business_id INTEGER NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
+    slug TEXT NOT NULL UNIQUE,
+    destination TEXT NOT NULL,
+    event_id INTEGER REFERENCES events(id) ON DELETE SET NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+
+  CREATE TABLE link_clicks (
+    id INTEGER PRIMARY KEY,
+    link_id INTEGER NOT NULL REFERENCES tracked_links(id) ON DELETE CASCADE,
+    clicked_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+  CREATE INDEX idx_link_clicks_link_time ON link_clicks (link_id, clicked_at);
+  `,
 ];
 
 function migrate(db: DatabaseSync) {

@@ -22,3 +22,9 @@ export function pickYear(param: string | undefined, years: number[]): number {
   if (Number.isInteger(n) && n > 1900 && n < 3000) return n;
   return years[0] ?? new Date().getFullYear();
 }
+
+/** Today as YYYY-MM-DD in the server's local timezone. */
+export function todayIso(): string {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}

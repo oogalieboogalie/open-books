@@ -1,17 +1,83 @@
 /**
- * Loads sample transactions so you can try the app: `npm run seed:demo`.
- * Uses the same database as the app (BOOKS_DB_PATH or ./data/books.db).
+ * Fills the app with six months of realistic sample data so you can explore it:
+ * `npm run seed:demo`. Uses the same database as the app (BOOKS_DB_PATH or
+ * ./data/books.db). Running it twice does not duplicate transactions.
+ *
+ * The story: a small design studio that posts on social media now and then.
+ * Posts are followed by a bump in contacts, appointments, and sales, so the
+ * timeline has something to show.
  */
-import fs from "node:fs";
-import path from "node:path";
+import { Activity } from "../src/lib/activity";
 import { Books } from "../src/lib/books";
-import { rowsFromCsv } from "../src/lib/csv";
 import { getDb } from "../src/lib/db";
+import { todayIso } from "../src/lib/format";
+import { addDays } from "../src/lib/timeline";
 
-const books = Books.forDefaultBusiness(getDb());
-const account = books.listAccounts()[0];
-const csv = fs.readFileSync(path.join(__dirname, "..", "samples", "business-checking-2026.csv"), "utf8");
-const { rows, errors } = rowsFromCsv(csv);
-const result = books.importRows(account.id, rows);
-console.log(`Imported ${result.imported} into "${account.name}" (${result.duplicates} already there, ${result.needsReview} to review).`);
-for (const e of errors) console.warn(e);
+let seed = 42;
+const rand = () => ((seed = (seed * 1_103_515_245 + 12_345) % 2_147_483_648) / 2_147_483_648);
+const between = (lo: number, hi: number) => Math.round(lo + rand() * (hi - lo));
+
+const db = getDb();
+const books = Books.forDefaultBusiness(db);
+const activity = Activity.for(books, db);
+const account = books.listAccounts()[0].id;
+const today = todayIso();
+const start = addDays(today, -182);
+
+if (activity.listEvents(start, today).length > 0) {
+  console.log("Demo data is already loaded.");
+  process.exit(0);
+}
+
+// Days when something was posted, and the boost it gives the following week.
+const posts = [
+  { offset: 20, kind: "social_post", title: "Instagram reel: before and after brand refresh", url: "https://instagram.com/p/demo1" },
+  { offset: 55, kind: "email", title: "Newsletter: spring availability", url: "" },
+  { offset: 90, kind: "social_post", title: "TikTok: logo design time-lapse", url: "https://tiktok.com/@demo/video/2" },
+  { offset: 118, kind: "promotion", title: "Summer bundle, 15% off brand kits", url: "" },
+  { offset: 150, kind: "social_post", title: "LinkedIn post: client case study", url: "https://linkedin.com/posts/demo3" },
+  { offset: 172, kind: "ad", title: "Meta ads test, $150 budget", url: "" },
+];
+const boost = (day: number) => posts.reduce((b, p) => (day >= p.offset && day < p.offset + 10 ? b + (10 - (day - p.offset)) / 10 : b), 0);
+
+const rows: { date: string; description: string; amountCents: number }[] = [];
+for (let d = 0; d <= 182; d++) {
+  const date = addDays(start, d);
+  const dow = new Date(`${date}T00:00:00Z`).getUTCDay();
+  const weekday = dow > 0 && dow < 6;
+  const b = boost(d);
+
+  // Sales: a couple a week normally, more after a post.
+  const sales = (weekday && rand() < 0.3 ? 1 : 0) + (rand() < b * 0.6 ? between(1, 2) : 0);
+  for (let i = 0; i < sales; i++) rows.push({ date, description: rand() < 0.7 ? "STRIPE TRANSFER" : "SQUARE INC", amountCents: between(150, 1800) * 100 });
+
+  activity.logMetric({ date, metric: "contacts", value: between(0, 2) + Math.round(b * between(2, 6)) });
+  if (weekday) activity.logMetric({ date, metric: "appointments", value: (rand() < 0.35 ? 1 : 0) + Math.round(b * between(0, 3)) });
+
+  // Spending
+  if (date.endsWith("-03")) rows.push({ date, description: "ADOBE *CREATIVE CLD", amountCents: -5999 });
+  if (date.endsWith("-05")) rows.push({ date, description: "GOOGLE *GSUITE_STUDIO", amountCents: -1440 });
+  if (date.endsWith("-01")) rows.push({ date, description: "WEWORK MEMBERSHIP", amountCents: -45000 });
+  if (date.endsWith("-14")) rows.push({ date, description: "COMCAST CABLE COMM", amountCents: -8999 });
+  if (date.endsWith("-28")) rows.push({ date, description: "MONTHLY SERVICE FEE", amountCents: -1500 });
+  if (weekday && rand() < 0.15) rows.push({ date, description: "STARBUCKS STORE #08812", amountCents: -between(5, 14) * 100 });
+  if (rand() < 0.05) rows.push({ date, description: "SHELL OIL 57444", amountCents: -between(35, 60) * 100 });
+  if (rand() < 0.04) rows.push({ date, description: "UPWORK -REF", amountCents: -between(200, 700) * 100 });
+  if (rand() < 0.03) rows.push({ date, description: "AMZN MKTP US", amountCents: -between(15, 90) * 100 });
+}
+for (const p of posts.filter((p) => p.kind === "ad")) rows.push({ date: addDays(start, p.offset), description: "FACEBK *ADS", amountCents: -15000 });
+
+const result = books.importRows(account, rows);
+for (const p of posts) {
+  const id = activity.addEvent({ date: addDays(start, p.offset), kind: p.kind, title: p.title, url: p.url });
+  if (p.kind === "social_post") {
+    const slug = activity.createLink({ destination: "https://example.com/book-a-call", eventId: id });
+    const link = db.prepare("SELECT id FROM tracked_links WHERE slug = ?").get(slug) as { id: number };
+    const insert = db.prepare("INSERT INTO link_clicks (link_id, clicked_at) VALUES (?, ?)");
+    for (let d = 0; d < 7; d++) {
+      const clicks = Math.round((7 - d) * between(2, 5));
+      for (let c = 0; c < clicks; c++) insert.run(link.id, `${addDays(start, p.offset + d)} 15:00:00`);
+    }
+  }
+}
+console.log(`Imported ${result.imported} transactions, ${posts.length} events, and daily contacts and appointments from ${start} to ${today}.`);

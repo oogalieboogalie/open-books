@@ -5,7 +5,11 @@ import type { AccountType } from "@/lib/books";
 import type { MatchType, UserRule } from "@/lib/categorize/engine";
 import { rowsFromCsv } from "@/lib/csv";
 import { dollarsToCents } from "@/lib/format";
+import { Activity } from "@/lib/activity";
+import { getDb } from "@/lib/db";
 import { getBooks } from "@/lib/server";
+
+const activity = () => Activity.for(getBooks(), getDb());
 
 const refresh = () => revalidatePath("/", "layout");
 
@@ -101,5 +105,53 @@ export async function deleteRuleAction(form: FormData) {
 
 export async function recategorizeAction() {
   getBooks().recategorize();
+  refresh();
+}
+
+export async function addEventAction(_prev: FormState, form: FormData): Promise<FormState> {
+  try {
+    const a = activity();
+    const id = a.addEvent({ date: str(form, "date"), kind: str(form, "kind"), title: str(form, "title"), url: str(form, "url"), notes: str(form, "notes") });
+    let msg = "Event logged.";
+    const destination = str(form, "trackDestination");
+    if (form.get("track") === "on") {
+      const slug = a.createLink({ destination: destination || str(form, "url"), eventId: id, slug: str(form, "slug") });
+      msg = `Event logged. Share /go/${slug} in your post to count clicks.`;
+    }
+    refresh();
+    return { ok: msg };
+  } catch (err) {
+    return { error: (err as Error).message };
+  }
+}
+
+export async function deleteEventAction(form: FormData) {
+  activity().deleteEvent(Number(form.get("id")));
+  refresh();
+}
+
+export async function logMetricAction(_prev: FormState, form: FormData): Promise<FormState> {
+  try {
+    const metric = str(form, "metric") === "__new" ? str(form, "newMetric") : str(form, "metric");
+    activity().logMetric({ date: str(form, "date"), metric, value: Number(str(form, "value")) });
+    refresh();
+    return { ok: "Saved." };
+  } catch (err) {
+    return { error: (err as Error).message };
+  }
+}
+
+export async function createLinkAction(_prev: FormState, form: FormData): Promise<FormState> {
+  try {
+    const slug = activity().createLink({ destination: str(form, "destination"), slug: str(form, "slug"), eventId: Number(str(form, "eventId")) || null });
+    refresh();
+    return { ok: `Created /go/${slug}` };
+  } catch (err) {
+    return { error: (err as Error).message };
+  }
+}
+
+export async function deleteLinkAction(form: FormData) {
+  activity().deleteLink(Number(form.get("id")));
   refresh();
 }

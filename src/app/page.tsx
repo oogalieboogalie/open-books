@@ -3,15 +3,18 @@ import { getCategory } from "@/lib/categories";
 import { money, moneyWhole, pickYear, shortDate } from "@/lib/format";
 import { buildScheduleC } from "@/lib/reports";
 import { getBooks } from "@/lib/server";
-import { MonthlyChart } from "./components/MonthlyChart";
+import { Activity } from "@/lib/activity";
+import { getDb } from "@/lib/db";
+import { TimelineExplorer } from "./components/TimelineExplorer";
 import { YearPicker } from "./components/YearPicker";
 
 export const dynamic = "force-dynamic";
 
-export default async function Dashboard({ searchParams }: { searchParams: Promise<{ year?: string }> }) {
+export default async function Dashboard({ searchParams }: { searchParams: Promise<{ year?: string; focus?: string }> }) {
+  const params = await searchParams;
   const books = getBooks();
   const years = books.years();
-  const year = pickYear((await searchParams).year, years);
+  const year = pickYear(params.year, years);
   const summary = buildScheduleC(books.categoryTotals(year), year);
   const review = books.reviewCount();
   const recent = books.listTransactions({ year, limit: 8 }).rows;
@@ -64,8 +67,11 @@ export default async function Dashboard({ searchParams }: { searchParams: Promis
       </section>
 
       <div className="card">
-        <h2>Income and expenses by month</h2>
-        <MonthlyChart data={books.monthlyTotals(year)} />
+        <div className="page-head" style={{ marginBottom: 8 }}>
+          <h2 style={{ margin: 0 }}>Income and expenses by month</h2>
+          <Link href="/timeline">Open the timeline for days, weeks, and events</Link>
+        </div>
+        <TimelineExplorer key={year} data={Activity.for(books, getDb()).timeline(`${year}-01-01`, `${year}-12-31`, "month")} initialFocus={params.focus} />
       </div>
 
       <div className="grid-2">

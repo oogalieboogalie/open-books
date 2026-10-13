@@ -33,6 +33,9 @@ export interface Transaction {
 
 export interface TransactionFilter {
   year?: number;
+  /** Inclusive YYYY-MM-DD bounds. */
+  from?: string;
+  to?: string;
   categoryId?: string;
   needsReview?: boolean;
   search?: string;
@@ -189,6 +192,14 @@ export class Books {
       where.push("t.date >= ? AND t.date < ?");
       params.push(`${filter.year}-01-01`, `${filter.year + 1}-01-01`);
     }
+    if (filter.from) {
+      where.push("t.date >= ?");
+      params.push(filter.from);
+    }
+    if (filter.to) {
+      where.push("t.date <= ?");
+      params.push(filter.to);
+    }
     if (filter.categoryId) {
       where.push("t.category_id = ?");
       params.push(filter.categoryId);
@@ -327,19 +338,6 @@ export class Books {
       .prepare("SELECT category_id, SUM(amount_cents) AS total FROM transactions WHERE business_id = ? AND date >= ? AND date < ? GROUP BY category_id")
       .all(this.businessId, `${year}-01-01`, `${year + 1}-01-01`) as { category_id: string; total: number }[];
     return new Map(rows.map((r) => [r.category_id, r.total]));
-  }
-
-  monthlyTotals(year: number): { month: number; incomeCents: number; expenseCents: number }[] {
-    const rows = this.db
-      .prepare("SELECT CAST(substr(date, 6, 2) AS INTEGER) AS month, category_id, SUM(amount_cents) AS total FROM transactions WHERE business_id = ? AND date >= ? AND date < ? GROUP BY month, category_id")
-      .all(this.businessId, `${year}-01-01`, `${year + 1}-01-01`) as { month: number; category_id: string; total: number }[];
-    const months = Array.from({ length: 12 }, (_, i) => ({ month: i + 1, incomeCents: 0, expenseCents: 0 }));
-    for (const r of rows) {
-      const kind = getCategory(r.category_id).kind;
-      if (kind === "income") months[r.month - 1].incomeCents += r.total;
-      else if (kind === "expense" || kind === "cogs") months[r.month - 1].expenseCents += -r.total;
-    }
-    return months;
   }
 
   reviewCount(): number {
