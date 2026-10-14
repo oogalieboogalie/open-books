@@ -118,6 +118,57 @@ const MIGRATIONS: string[] = [
   );
   CREATE INDEX idx_link_clicks_link_time ON link_clicks (link_id, clicked_at);
   `,
+  `
+  -- The AI assistant's knowledge of the books: one searchable document per
+  -- transaction, event, month, and rule. Full-text search always works; the
+  -- embedding column is added at runtime when pgvector is available (see
+  -- ensureVectorSupport), so plain Postgres servers still run the app.
+  CREATE TABLE ai_documents (
+    id BIGSERIAL PRIMARY KEY,
+    business_id INTEGER NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
+    source_type TEXT NOT NULL,
+    source_id TEXT NOT NULL,
+    date DATE,
+    title TEXT NOT NULL,
+    content TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    embed_model TEXT,
+    tsv tsvector GENERATED ALWAYS AS (to_tsvector('english', title || ' ' || content)) STORED,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (business_id, source_type, source_id)
+  );
+  CREATE INDEX idx_ai_documents_tsv ON ai_documents USING gin (tsv);
+
+  CREATE TABLE ai_conversations (
+    id SERIAL PRIMARY KEY,
+    business_id INTEGER NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
+    title TEXT NOT NULL DEFAULT 'New conversation',
+    provider TEXT NOT NULL,
+    model TEXT NOT NULL,
+    -- Fixed when the conversation starts: changing it later would invalidate
+    -- the model's earlier reasoning in this conversation.
+    system_prompt TEXT NOT NULL DEFAULT '',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+  );
+  CREATE INDEX idx_ai_conversations_business ON ai_conversations (business_id, updated_at);
+
+  -- One row per question and per answer. "native" keeps the exact messages
+  -- the provider produced (thinking and tool calls included) so a conversation
+  -- can be continued without editing its history.
+  CREATE TABLE ai_messages (
+    id SERIAL PRIMARY KEY,
+    conversation_id INTEGER NOT NULL REFERENCES ai_conversations(id) ON DELETE CASCADE,
+    role TEXT NOT NULL,
+    content TEXT NOT NULL,
+    provider TEXT NOT NULL DEFAULT '',
+    model TEXT NOT NULL DEFAULT '',
+    activity JSONB NOT NULL DEFAULT '[]',
+    native JSONB NOT NULL DEFAULT '[]',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+  );
+  CREATE INDEX idx_ai_messages_conversation ON ai_messages (conversation_id, id);
+  `,
 ];
 
 // Return dates as 'YYYY-MM-DD', timestamps as ISO-ish strings, and int8/numeric
@@ -183,7 +234,8 @@ async function openPg(url: string): Promise<Db> {
 
 async function openPglite(dataDir: string | undefined): Promise<Db> {
   const { PGlite } = await import("@electric-sql/pglite");
-  const pglite = await PGlite.create({ dataDir, parsers: PARSERS });
+  const { vector } = await import("@electric-sql/pglite-pgvector");
+  const pglite = await PGlite.create({ dataDir, parsers: PARSERS, extensions: { vector } });
 
   type Queryable = { query: <R>(sql: string, params?: unknown[]) => Promise<{ rows: R[] }>; exec: (sql: string) => Promise<unknown> };
   const wrap = (q: Queryable, tx: Db["transaction"]): Db => ({
@@ -212,6 +264,29 @@ export async function openDatabase(target: string): Promise<Db> {
   const db = /^postgres(ql)?:\/\//.test(target) ? await openPg(target) : await openPglite(target === "memory" ? undefined : target);
   await migrate(db);
   return db;
+}
+
+const vectorSupport = new WeakMap<Db, Promise<boolean>>();
+
+/**
+ * Enables pgvector and adds the embedding column, once per database. Returns
+ * false on a Postgres server without the extension; the assistant then falls
+ * back to full-text search only.
+ */
+export function ensureVectorSupport(db: Db): Promise<boolean> {
+  let ready = vectorSupport.get(db);
+  if (!ready) {
+    ready = (async () => {
+      try {
+        await db.exec("CREATE EXTENSION IF NOT EXISTS vector; ALTER TABLE ai_documents ADD COLUMN IF NOT EXISTS embedding vector");
+        return true;
+      } catch {
+        return false;
+      }
+    })();
+    vectorSupport.set(db, ready);
+  }
+  return ready;
 }
 
 const globalForDb = globalThis as unknown as { __openBooksDb?: Promise<Db> };

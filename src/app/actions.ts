@@ -5,6 +5,8 @@ import type { AccountType } from "@/lib/books";
 import type { MatchType, UserRule } from "@/lib/categorize/engine";
 import { rowsFromCsv } from "@/lib/csv";
 import { dollarsToCents } from "@/lib/format";
+import { categorizeInBackground } from "@/lib/ai/server";
+import { aiServices } from "@/lib/ai/services";
 import { getActivity, getBooks } from "@/lib/server";
 
 const refresh = () => revalidatePath("/", "layout");
@@ -57,6 +59,8 @@ export interface ImportState extends FormState {
   duplicates?: number;
   needsReview?: number;
   skipped?: string[];
+  /** The AI pass is sorting the unclear ones in the background. */
+  aiSorting?: boolean;
 }
 
 export async function importCsvAction(_prev: ImportState, form: FormData): Promise<ImportState> {
@@ -66,9 +70,13 @@ export async function importCsvAction(_prev: ImportState, form: FormData): Promi
   const accountId = Number(form.get("accountId"));
   const { rows, errors } = rowsFromCsv(await file.text(), { flipSigns: form.get("flipSigns") === "on" });
   if (rows.length === 0) return { error: errors[0] ?? "No transactions found in that file." };
-  const result = await (await getBooks()).importRows(accountId, rows);
+  const books = await getBooks();
+  const result = await books.importRows(accountId, rows);
+  const ai = aiServices();
+  const aiSorting = result.needsReview > 0 && !!ai.provider && ai.config.autoCategorize;
+  if (aiSorting) categorizeInBackground(books);
   refresh();
-  return { ...result, skipped: errors.slice(0, 20) };
+  return { ...result, skipped: errors.slice(0, 20), aiSorting };
 }
 
 export async function createAccountAction(_prev: FormState, form: FormData): Promise<FormState> {
