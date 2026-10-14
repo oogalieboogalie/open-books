@@ -30,6 +30,17 @@ services:
       GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
       GOOGLE_ENABLE_GMAIL: ${GOOGLE_ENABLE_GMAIL:-}
       INBOUND_EMAIL_DOMAIN: ${INBOUND_EMAIL_DOMAIN:-}
+      # AI assistant. With ANTHROPIC_API_KEY set it uses Claude; otherwise Ollama.
+      AI_PROVIDER: ${AI_PROVIDER:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-opus-5-5}
+      # The bundled Ollama (--profile ollama), or http://host.docker.internal:11434
+      # for an Ollama already running on this computer.
+      OLLAMA_URL: ${OLLAMA_URL:-http://ollama:11434}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen3:8b}
+      EMBED_MODEL: ${EMBED_MODEL:-nomic-embed-text}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - appdata:/app/data
     ports:
@@ -39,6 +50,37 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  # Local models for the assistant: `docker compose --profile ollama up`.
+  # Add `-f docker-compose.gpu.yml` to run them on an NVIDIA GPU.
+  ollama:
+    image: ollama/ollama:latest
+    profiles: ["ollama"]
+    volumes:
+      - ollama:/root/.ollama
+    ports:
+      - "127.0.0.1:11434:11434"
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  # Downloads the chat and embedding models once, then exits.
+  ollama-pull:
+    image: ollama/ollama:latest
+    profiles: ["ollama"]
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen3:8b}
+      EMBED_MODEL: ${EMBED_MODEL:-nomic-embed-text}
+    entrypoint: ["/bin/sh", "-c", "ollama pull \"$$OLLAMA_MODEL\" && ollama pull \"$$EMBED_MODEL\""]
+    depends_on:
+      ollama:
+        condition: service_healthy
+    restart: "no"
+
 volumes:
   pgdata:
   appdata:
+  ollama:

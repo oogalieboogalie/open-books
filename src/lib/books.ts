@@ -147,16 +147,20 @@ export class Books {
     return categorize({ description, amountCents }, defaultClassifiers(await this.listRules()));
   }
 
-  /** Re-runs categorization on everything not set by hand. Returns how many changed. */
+  /**
+   * Re-runs categorization on everything not set by hand. Returns how many changed.
+   * Answers from the AI pass are kept unless one of your rules now matches.
+   */
   async recategorize(): Promise<number> {
     const classifiers = defaultClassifiers(await this.listRules());
-    const rows = await this.db.query<{ id: number; description: string; amount_cents: number; category_id: string; rule_id: number | null; confidence: number }>(
-      "SELECT id, description, amount_cents, category_id, rule_id, confidence FROM transactions WHERE business_id = $1 AND category_source <> 'user'",
+    const rows = await this.db.query<{ id: number; description: string; amount_cents: number; category_id: string; category_source: string; rule_id: number | null; confidence: number }>(
+      "SELECT id, description, amount_cents, category_id, category_source, rule_id, confidence FROM transactions WHERE business_id = $1 AND category_source <> 'user'",
       [this.businessId],
     );
     let changed = 0;
     for (const r of rows) {
       const s = categorize({ description: r.description, amountCents: r.amount_cents }, classifiers);
+      if (r.category_source === "ai" && s.source !== "rule") continue;
       if (s.categoryId === r.category_id && (s.ruleId ?? null) === r.rule_id && s.confidence === r.confidence) continue;
       await this.db.query(
         "UPDATE transactions SET category_id = $1, category_source = $2, confidence = $3, reason = $4, rule_id = $5, needs_review = $6, updated_at = now() WHERE id = $7",

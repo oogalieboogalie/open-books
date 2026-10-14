@@ -86,7 +86,10 @@ export function ImportForm({ accounts }: { accounts: { id: number; name: string 
             Imported {state.imported} transaction{state.imported === 1 ? "" : "s"}
             {state.duplicates ? `, skipped ${state.duplicates} already imported` : ""}.{" "}
             {state.needsReview ? (
-              <a href="/transactions?review=1">{state.needsReview} need a quick review.</a>
+              <>
+                <a href="/transactions?review=1">{state.needsReview} need a quick review.</a>
+                {state.aiSorting ? " The AI assistant is sorting those now, so refresh in a minute to see fewer." : ""}
+              </>
             ) : (
               <a href="/transactions">View transactions.</a>
             )}
