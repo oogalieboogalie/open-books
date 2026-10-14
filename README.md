@@ -15,6 +15,9 @@ This is the first module of a larger open toolkit for small business owners. Mil
 - **Needs-review queue** for anything the categorizer is unsure about.
 - **Timeline** of income and expenses by day, week, or month, with events (a social post, a promotion, an email) and the numbers you track (new contacts, appointments, leads, or anything you name) on the same axis. Hover a column for a summary; click it to see every transaction, event, and number from that period.
 - **Tracked links.** Make a short link (`/go/fall-special`) for a post; each click is counted on the day it happens and shows up on the timeline next to your sales. Link previews from social networks are not counted.
+- **Google Sheets, both ways.** Connect a sheet you already keep your books in and new rows come in on every sync, categorized like a bank import. Or have Open Books keep a sheet of your books (transactions, monthly totals, a Schedule C summary per year) for your accountant.
+- **Google Calendar appointments** on the timeline as "Booked appointments", next to income, with each appointment listed when you click a day. Choose which events count (only ones with guests, or titles with a keyword).
+- **Receipts by email.** Forward receipts to your own address, or let Open Books watch Gmail or any IMAP mailbox. Each receipt is read for the store, total, date, and order number (including receipts you forwarded), keeps its PDF, and is matched to the card charge, even if the charge is imported days later. Upload photos and PDFs by hand too.
 - **Tax report** shaped like Schedule C, with meals at 50%, an estimate of self-employment tax, and a CSV download for your tax preparer.
 
 ## Quick start
@@ -47,6 +50,25 @@ DATABASE_URL=postgres://user:pass@host:5432/books npm run build && npm start
 | `PGLITE_DIR` | `./data/pglite` | Where the embedded database keeps its files. |
 | `BUSINESS_TZ` | server timezone | IANA timezone (e.g. `America/Chicago`) for deciding which day a link click falls on. |
 | `DATABASE_POOL_SIZE` | `10` | Max connections to `DATABASE_URL`. |
+| `APP_SECRET` | random, saved in `./data/.app-secret` | Encrypts stored Google tokens and mailbox passwords. Set it in production. |
+| `APP_URL` | the request's address | Public address of the app, used for the Google redirect URI and the inbound email URL. |
+| `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | unset | Your Google OAuth client, for Sheets, Calendar, and Gmail. |
+| `GOOGLE_ENABLE_GMAIL` | off | Set to `1` to offer reading receipts from Gmail (self-hosted only; see below). |
+| `INBOUND_EMAIL_DOMAIN` | unset | Domain of your receipt forwarding address (`receipts+TOKEN@domain`). |
+| `SYNC_INTERVAL_MINUTES` | `15` | How often connected sheets, calendars, and mailboxes sync. `0` turns it off. |
+| `CRON_SECRET` | unset | Enables `POST /api/integrations/sync` with `Authorization: Bearer …` for an external scheduler. |
+
+## Integrations
+
+Everything is set up on the **Integrations** page, which also walks through each step.
+
+**Google (Sheets and Calendar).** Each server uses its own Google Cloud project, so data only travels between Google and your server. Create a project, enable the Sheets and Calendar APIs, set up the consent screen, and create a *Web application* OAuth client with the redirect URI `{APP_URL}/integrations/google/callback`. Set `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET`. Open Books asks only for the scopes a feature needs, when you turn it on. Without Google set up, you can still import a sheet shared as "Anyone with the link can view".
+
+**Receipts by email.** Point any inbound email service at `/api/email/inbound?token=…` (the page shows your URL): a Cloudflare Email Worker (code on the page), Postmark, Mailgun, or SendGrid all work. Set `INBOUND_EMAIL_DOMAIN` to show the forwarding address.
+
+**Gmail** needs the `gmail.readonly` scope, which Google treats as restricted: a public app needs a security assessment to use it. For your own server, enable the Gmail API and set `GOOGLE_ENABLE_GMAIL=1`. **IMAP** works with any provider using an app password.
+
+**Syncing** runs in the background every `SYNC_INTERVAL_MINUTES`. Imports run first, then waiting receipts are matched, then the export sheet is rewritten. Receipts are matched when the amount is the same, the charge posts within a few days, and it is the only such charge (or the only one from that vendor). Anything less certain is suggested on the Receipts page.
 
 ## How categorization works
 
@@ -70,6 +92,9 @@ src/lib/books.ts             All reads and writes, scoped to one business
 src/lib/reports.ts           Schedule C summary and SE tax estimate
 src/lib/activity.ts          Events, daily numbers, tracked links, timeline queries
 src/lib/timeline.ts          Day/week/month bucketing and range presets
+src/lib/integrations/        Google sign-in, Sheets, Calendar, Gmail/IMAP, the sync runner
+src/lib/receipts/            Reading receipt emails and matching them to transactions
+src/lib/secrets.ts           Encryption for stored credentials
 src/lib/db.ts                Postgres connection (server or embedded) and migrations
 src/app/                     Next.js pages and server actions
 tests/                       Vitest tests (npm test)
@@ -88,9 +113,10 @@ Contributions are welcome, especially merchant keywords. To teach the categorize
 - [x] Income and expense tracking with automatic Schedule C categorization
 - [ ] Accounts and sign-in, multiple businesses per user (the data model is already scoped by business)
 - [x] Timeline of money, events, and tracked numbers, with drill-down and tracked links
-- [ ] Pull numbers in automatically (booking tools, CRM, website analytics, social platforms)
+- [x] Google Sheets import and export, Google Calendar appointments, receipts from email
+- [ ] Pull more numbers in automatically (booking tools, CRM, website analytics, social platforms)
 - [ ] AI assistant with retrieval over your own books (pgvector), hosted or self-hosted with your own API key
-- [ ] Receipt capture and attachment
+- [x] Receipt capture and matching (email, Gmail, IMAP, upload)
 - [ ] Automatic mileage capture and the standard mileage deduction
 - [ ] Quarterly estimated tax reminders
 - [ ] Proposals and invoices

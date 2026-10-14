@@ -23,6 +23,15 @@ services:
     environment:
       DATABASE_URL: postgres://books:${POSTGRES_PASSWORD:-books}@db:5432/books
       BUSINESS_TZ: ${BUSINESS_TZ:-America/New_York}
+      # Integrations (see README). APP_SECRET encrypts stored tokens; without it a key is kept in the appdata volume.
+      APP_SECRET: ${APP_SECRET:-}
+      APP_URL: ${APP_URL:-http://localhost:3000}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+      GOOGLE_ENABLE_GMAIL: ${GOOGLE_ENABLE_GMAIL:-}
+      INBOUND_EMAIL_DOMAIN: ${INBOUND_EMAIL_DOMAIN:-}
+    volumes:
+      - appdata:/app/data
     ports:
       - "3000:3000"
     depends_on:
@@ -32,3 +41,4 @@ services:
 
 volumes:
   pgdata:
+  appdata:
