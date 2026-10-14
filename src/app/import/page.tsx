@@ -30,6 +30,7 @@ export default async function ImportPage() {
             <li>Most banks offer CSV under &quot;Download&quot; or &quot;Export&quot; on the activity page.</li>
             <li>The file needs a header row with a date, a description, and either an amount or separate debit and credit columns.</li>
             <li>Importing an overlapping date range is safe: transactions already imported are skipped.</li>
+            <li>Keep your books in Google Sheets? <a href="/integrations#sheets">Connect the sheet</a> and new rows come in automatically.</li>
             <li>Keep business and personal spending in separate accounts if you can. It makes your books much cleaner.</li>
           </ul>
         </div>

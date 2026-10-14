@@ -12,6 +12,7 @@ import { Activity } from "../src/lib/activity";
 import { Books } from "../src/lib/books";
 import { businessTimeZone, getDb } from "../src/lib/db";
 import { todayIso } from "../src/lib/format";
+import { Receipts } from "../src/lib/receipts/receipts";
 import { addDays } from "../src/lib/timeline";
 
 let seed = 42;
@@ -86,7 +87,23 @@ async function main() {
       }
     }
   }
-  console.log(`Imported ${result.imported} transactions, ${posts.length} events, and daily contacts and appointments from ${start} to ${today}.`);
+  // Receipts: a few that arrived by email and matched their charges, and one still waiting for its transaction.
+  const receipts = Receipts.for(books);
+  const recent = (await books.listTransactions({ from: addDays(today, -40), to: today, limit: 500 })).rows;
+  const emailed = [
+    { match: "ADOBE", vendor: "Adobe", fromAddress: "mail@mail.adobe.com", subject: "Your Adobe invoice" },
+    { match: "GOOGLE", vendor: "Google Workspace", fromAddress: "payments-noreply@google.com", subject: "Google Workspace: Your invoice is available" },
+    { match: "WEWORK", vendor: "WeWork", fromAddress: "billing@wework.com", subject: "Your WeWork receipt" },
+    { match: "AMZN", vendor: "Amazon.com", fromAddress: "auto-confirm@amazon.com", subject: "Your Amazon.com order" },
+  ];
+  for (const r of emailed) {
+    const t = recent.find((x) => x.description.startsWith(r.match));
+    if (!t) continue;
+    await receipts.add({ source: "forward", vendor: r.vendor, fromAddress: r.fromAddress, subject: r.subject, date: t.date, amountCents: -t.amountCents, externalId: `demo:${t.id}` });
+  }
+  await receipts.add({ source: "forward", vendor: "Blick Art Materials", fromAddress: "orders@dickblick.com", subject: "Your Blick order confirmation", date: addDays(today, -1), amountCents: 4217, orderRef: "B7731920", externalId: "demo:blick" });
+
+  console.log(`Imported ${result.imported} transactions, ${posts.length} events, daily contacts and appointments, and sample receipts from ${start} to ${today}.`);
   await db.close();
 }
 

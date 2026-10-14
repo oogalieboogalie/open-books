@@ -207,3 +207,18 @@ code { font-size: 0.85rem; background: var(--surface-2); padding: 1px 6px; borde
 @media (max-width: 640px) {
   .sm-title { padding-left: 0; }
 }
+
+/* Integrations and receipts */
+a.button {
+  display: inline-block; background: var(--accent); color: var(--accent-text); border-radius: 8px; padding: 8px 14px; font-weight: 600; text-decoration: none;
+}
+a.button.secondary { background: var(--surface-2); color: var(--text); border: 1px solid var(--border); }
+.steps { padding-left: 20px; display: grid; gap: 6px; }
+pre.code { background: var(--surface-2); border-radius: 8px; padding: 10px 12px; overflow-x: auto; font-size: 0.8rem; }
+.receipt { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px 16px; border-bottom: 1px solid var(--border); padding: 12px 0; }
+.receipt:last-child { border-bottom: none; }
+.receipt .amount { font-size: 1.1rem; font-weight: 650; font-variant-numeric: tabular-nums; text-align: right; }
+.receipt .body { grid-column: 1 / -1; display: grid; gap: 8px; }
+.receipt.focus { background: var(--surface-2); border-radius: var(--radius); padding: 12px; }
+.tag.good { background: color-mix(in srgb, var(--good) 15%, transparent); color: var(--good); }
+.candidate { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px; align-items: center; padding: 6px 10px; border: 1px solid var(--border); border-radius: 8px; }

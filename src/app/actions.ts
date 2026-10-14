@@ -5,6 +5,7 @@ import type { AccountType } from "@/lib/books";
 import type { MatchType, UserRule } from "@/lib/categorize/engine";
 import { rowsFromCsv } from "@/lib/csv";
 import { dollarsToCents } from "@/lib/format";
+import { Receipts } from "@/lib/receipts/receipts";
 import { getActivity, getBooks } from "@/lib/server";
 
 const refresh = () => revalidatePath("/", "layout");
@@ -27,7 +28,9 @@ export async function addTransactionAction(_prev: FormState, form: FormData): Pr
   const amountCents = direction === "in" ? Math.abs(cents) : -Math.abs(cents);
   const accountId = Number(str(form, "accountId")) || null;
   const categoryId = str(form, "categoryId") || undefined;
-  await (await getBooks()).addTransaction({ date, description, amountCents, accountId, categoryId, notes: str(form, "notes") });
+  const books = await getBooks();
+  await books.addTransaction({ date, description, amountCents, accountId, categoryId, notes: str(form, "notes") });
+  await Receipts.for(books).matchUnmatched();
   refresh();
   return { ok: "Added." };
 }
@@ -66,7 +69,10 @@ export async function importCsvAction(_prev: ImportState, form: FormData): Promi
   const accountId = Number(form.get("accountId"));
   const { rows, errors } = rowsFromCsv(await file.text(), { flipSigns: form.get("flipSigns") === "on" });
   if (rows.length === 0) return { error: errors[0] ?? "No transactions found in that file." };
-  const result = await (await getBooks()).importRows(accountId, rows);
+  const books = await getBooks();
+  const result = await books.importRows(accountId, rows);
+  // Receipts that arrived before these transactions can be matched now.
+  await Receipts.for(books).matchUnmatched();
   refresh();
   return { ...result, skipped: errors.slice(0, 20) };
 }

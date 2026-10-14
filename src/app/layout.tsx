@@ -12,9 +12,11 @@ const NAV = [
   { href: "/timeline", label: "Timeline" },
   { href: "/transactions", label: "Transactions" },
   { href: "/import", label: "Import" },
+  { href: "/receipts", label: "Receipts" },
   { href: "/rules", label: "Rules" },
   { href: "/reports", label: "Tax report" },
   { href: "/categories", label: "Categories" },
+  { href: "/integrations", label: "Integrations" },
 ];
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

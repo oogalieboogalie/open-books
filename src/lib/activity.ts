@@ -2,6 +2,7 @@ import { randomBytes } from "node:crypto";
 import type { Books, Transaction } from "./books";
 import { getCategory } from "./categories";
 import { businessTimeZone, type Db } from "./db";
+import { appointmentCounts, appointmentsBetween, type Appointment } from "./integrations/calendar";
 import { BUILTIN_METRICS, DERIVED_METRICS, EVENT_KINDS, bucketIndex, buildBuckets, metricKey, type Bucket, type Granularity } from "./timeline";
 
 export interface BusinessEvent {
@@ -56,6 +57,8 @@ export interface PeriodDetail {
   events: BusinessEvent[];
   metrics: { date: string; key: string; name: string; value: number }[];
   clicks: { slug: string; destination: string; eventTitle: string | null; count: number }[];
+  /** Appointments from connected calendars. */
+  appointments: Appointment[];
 }
 
 const ISO = /^\d{4}-\d{2}-\d{2}$/;
@@ -187,7 +190,7 @@ export class Activity {
       seriesMap.get(key)![i] += value;
     };
 
-    const [txRows, metricRows, clickRows, defs, events] = await Promise.all([
+    const [txRows, metricRows, clickRows, defs, events, apptRows] = await Promise.all([
       this.db.query<{ date: string; category_id: string; total: number; deposits: number }>(
         `SELECT date, category_id, SUM(amount_cents)::bigint AS total, COUNT(*) FILTER (WHERE amount_cents > 0)::int AS deposits
          FROM transactions WHERE business_id = $1 AND date BETWEEN $2 AND $3 GROUP BY date, category_id`,
@@ -200,6 +203,7 @@ export class Activity {
       this.clicksByDay(rangeFrom, rangeTo),
       this.metricDefs(),
       this.listEvents(rangeFrom, rangeTo),
+      appointmentCounts(this.db, this.businessId, rangeFrom, rangeTo),
     ]);
 
     for (const r of txRows) {
@@ -212,6 +216,7 @@ export class Activity {
     }
     for (const r of metricRows) add(r.metric, r.date, r.value);
     for (const r of clickRows) add("link_clicks", r.date, r.count);
+    for (const r of apptRows) add("booked_appointments", r.date, r.count);
 
     const series = defs
       .filter((d) => seriesMap.get(d.key)?.some((v) => v !== 0))
@@ -240,7 +245,7 @@ export class Activity {
 
   async periodDetail(from: string, to: string, books: Books): Promise<PeriodDetail> {
     const range = [this.businessId, from, to];
-    const [totals, list, events, metricRows, clickRows, defs] = await Promise.all([
+    const [totals, list, events, metricRows, clickRows, defs, appointments] = await Promise.all([
       this.db.query<{ category_id: string; total: number; n: number }>(
         "SELECT category_id, SUM(amount_cents)::bigint AS total, COUNT(*)::int AS n FROM transactions WHERE business_id = $1 AND date BETWEEN $2 AND $3 GROUP BY category_id",
         range,
@@ -253,6 +258,7 @@ export class Activity {
       ),
       this.clicksByDay(from, to),
       this.metricDefs(),
+      appointmentsBetween(this.db, this.businessId, from, to),
     ]);
 
     let incomeCents = 0;
@@ -278,6 +284,7 @@ export class Activity {
       events,
       metrics: metricRows.map((m) => ({ ...m, name: defs.find((d) => d.key === m.key)?.name ?? m.key })),
       clicks: [...clickMap.values()].sort((a, b) => b.count - a.count),
+      appointments,
     };
   }
 

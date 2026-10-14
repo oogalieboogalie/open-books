@@ -102,6 +102,7 @@ export default async function TransactionsPage({ searchParams }: { searchParams:
                       <span className="date-inline">{shortDate(t.date)} · </span>
                       {t.accountName}
                       {t.notes && <> · {t.notes}</>}
+                      {t.receiptId && <> · <Link href={`/receipts?id=${t.receiptId}#r${t.receiptId}`}>Receipt</Link></>}
                     </div>
                     <div className="tx-actions">
                       <details>

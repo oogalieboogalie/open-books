@@ -28,6 +28,8 @@ export interface Transaction {
   reason: string;
   needsReview: boolean;
   notes: string;
+  /** A receipt matched to this transaction, if any. */
+  receiptId: number | null;
 }
 
 export interface TransactionFilter {
@@ -50,11 +52,14 @@ export interface NewTransaction {
   accountId?: number | null;
   categoryId?: string;
   notes?: string;
+  /** Where it came from, such as "sheet:3". Empty for typed or CSV entries. */
+  source?: string;
 }
 
 const TX_COLUMNS = `t.id, t.account_id AS "accountId", a.name AS "accountName", t.date, t.description, t.merchant_key AS "merchantKey",
   t.amount_cents AS "amountCents", t.category_id AS "categoryId", t.category_source AS "categorySource", t.confidence, t.reason,
-  t.needs_review AS "needsReview", t.notes`;
+  t.needs_review AS "needsReview", t.notes,
+  (SELECT r.id FROM receipts r WHERE r.transaction_id = t.id ORDER BY r.id LIMIT 1) AS "receiptId"`;
 
 /**
  * All bookkeeping reads and writes for one business. Every query is scoped by
@@ -212,10 +217,10 @@ export class Books {
     }
     const needsReview = s.confidence < REVIEW_THRESHOLD;
     const row = await this.db.one<{ id: number }>(
-      `INSERT INTO transactions (business_id, account_id, date, description, merchant_key, amount_cents, category_id, category_source, confidence, reason, rule_id, needs_review, notes, import_hash)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+      `INSERT INTO transactions (business_id, account_id, date, description, merchant_key, amount_cents, category_id, category_source, confidence, reason, rule_id, needs_review, notes, import_hash, source)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
        ON CONFLICT DO NOTHING RETURNING id`,
-      [this.businessId, accountId, input.date, description, merchantKey(description), input.amountCents, s.categoryId, s.source, s.confidence, s.reason, s.ruleId ?? null, needsReview, input.notes ?? "", importHash],
+      [this.businessId, accountId, input.date, description, merchantKey(description), input.amountCents, s.categoryId, s.source, s.confidence, s.reason, s.ruleId ?? null, needsReview, input.notes ?? "", importHash, input.source ?? ""],
     );
     return row ? { id: row.id, needsReview } : null;
   }
@@ -225,7 +230,7 @@ export class Books {
    * range) skips rows already present, including legitimately repeated rows such
    * as two identical coffees on the same day.
    */
-  async importRows(accountId: number, rows: ImportedRow[]): Promise<{ imported: number; duplicates: number; needsReview: number }> {
+  async importRows(accountId: number, rows: ImportedRow[], opts: { source?: string } = {}): Promise<{ imported: number; duplicates: number; needsReview: number }> {
     await this.assertAccount(accountId);
     return this.inTransaction(async (books) => {
       const rules = await books.listRules();
@@ -238,7 +243,7 @@ export class Books {
         const occurrence = (seen.get(base) ?? 0) + 1;
         seen.set(base, occurrence);
         const hash = createHash("sha256").update(`${base}|${occurrence}`).digest("hex");
-        const added = await books.addTransaction({ ...row, accountId }, hash, rules);
+        const added = await books.addTransaction({ ...row, accountId, source: opts.source }, hash, rules);
         if (!added) {
           duplicates++;
         } else {

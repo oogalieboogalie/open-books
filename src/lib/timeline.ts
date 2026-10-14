@@ -147,6 +147,7 @@ export const BUILTIN_METRICS = [
 export const DERIVED_METRICS = [
   { key: "sales_count", name: "Sales count" },
   { key: "link_clicks", name: "Link clicks" },
+  { key: "booked_appointments", name: "Booked appointments" },
 ] as const;
 
 export function metricKey(name: string): string {

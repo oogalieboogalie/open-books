@@ -310,6 +310,24 @@ function PeriodPanel({ label, detail, loading, onClose }: { label: string; detai
                   </li>
                 ))}
               </ul>
+              {detail.appointments.length > 0 && (
+                <>
+                  <h3>Appointments ({detail.appointments.length})</h3>
+                  <ul className="plain-list">
+                    {detail.appointments.map((a) => (
+                      <li key={a.id}>
+                        <strong>{a.title}</strong>
+                        <div className="tx-meta">
+                          {formatDay(a.date)} · {a.allDay || !a.startsAt ? "All day" : new Date(a.startsAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}
+                          {a.attendees > 0 && <> · {a.attendees} guest{a.attendees === 1 ? "" : "s"}</>}
+                          {a.location && <> · {a.location}</>}
+                          {a.url && <> · <a href={a.url} target="_blank" rel="noreferrer">open</a></>}
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
+                </>
+              )}
             </div>
           </div>
 
@@ -325,7 +343,11 @@ function PeriodPanel({ label, detail, loading, onClose }: { label: string; detai
                       <td className="muted" style={{ whiteSpace: "nowrap" }}>{formatDay(t.date)}</td>
                       <td>
                         <div className="tx-desc">{t.description}</div>
-                        <div className="tx-meta">{t.categoryName}{t.notes ? ` · ${t.notes}` : ""}</div>
+                        <div className="tx-meta">
+                          {t.categoryName}
+                          {t.notes ? ` · ${t.notes}` : ""}
+                          {t.receiptId && <> · <a href={`/receipts?id=${t.receiptId}`}>receipt</a></>}
+                        </div>
                       </td>
                       <td className={`num ${t.amountCents > 0 ? "pos" : ""}`}>{money(t.amountCents)}</td>
                     </tr>

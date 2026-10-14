@@ -147,7 +147,12 @@ export interface ImportOptions {
 }
 
 export function rowsFromCsv(text: string, options: ImportOptions = {}): ImportResult {
-  const table = parseCsv(text);
+  return rowsFromTable(parseCsv(text), options);
+}
+
+/** Same as rowsFromCsv, for rows that are already split into cells (such as a Google Sheet). */
+export function rowsFromTable(input: string[][], options: ImportOptions = {}): ImportResult {
+  const table = input.map((r) => r.map((c) => String(c ?? ""))).filter((r) => r.some((cell) => cell.trim() !== ""));
   if (table.length === 0) return { rows: [], errors: ["The file is empty."], mapping: null };
 
   // Some banks put a few lines of account info above the header.
